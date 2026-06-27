@@ -64,6 +64,7 @@ var registry = serviceProvider.GetRequiredService<IAgentRegistry>();
 var agent = registry.GetAgent("code");
 var runner = serviceProvider.GetRequiredService<IAgentRunner>();
 var options = serviceProvider.GetRequiredService<OpenAiOptions>();
+var chatOptions = serviceProvider.GetRequiredService<ClickChatOptions>();
 
 var metadata = new AgentMetadata(
     CurrentDateTime: DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss"),
@@ -110,8 +111,8 @@ while (!cts.Token.IsCancellationRequested)
         history.Add(new ChatMessage("user", input));
         history.Add(new ChatMessage("assistant", result.Content, ReasoningContent: result.ReasoningContent));
 
-        const int maxHistoryMessages = 20;
-        const int maxHistoryChars = 25000;
+        var maxHistoryMessages = chatOptions.MaxHistoryMessages > 0 ? chatOptions.MaxHistoryMessages : 20;
+        var maxHistoryChars = chatOptions.MaxHistoryChars > 0 ? chatOptions.MaxHistoryChars : 25000;
         if (history.Count > maxHistoryMessages)
             history.RemoveRange(0, history.Count - maxHistoryMessages);
 

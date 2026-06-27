@@ -2,20 +2,31 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using AgentSharp;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Click.Infrastructure;
 
 public class AgentRunner : IAgentRunner
 {
     private readonly IChatService _chatService;
+    private readonly ILogger<AgentRunner> _logger;
+    private readonly AgentRunnerOptions _options;
 
     private static readonly Regex InternalTokensRegex = new(
         @"<\|[^|]+\|>|\[INST\]|\[/INST\]| to=functions\.\w+\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
-    public AgentRunner(IChatService chatService)
+    private static readonly Regex WhitespaceRegex = new(@"\s+", RegexOptions.Compiled);
+
+    public AgentRunner(
+        IChatService chatService,
+        ILogger<AgentRunner> logger,
+        IOptions<AgentRunnerOptions> options)
     {
         _chatService = chatService;
+        _logger = logger;
+        _options = options.Value;
     }
 
     private static UsageInfo? AddUsage(UsageInfo? acc, UsageInfo? next)
@@ -28,9 +39,11 @@ public class AgentRunner : IAgentRunner
             acc.TotalTokens + next.TotalTokens);
     }
 
-    private static void CompactMessages(List<ApiMessage> messages, int preserveRecentToolRounds = 2)
+    private void CompactMessages(List<ApiMessage> messages)
     {
-        const int maxToolLength = 2500;
+        var maxToolLength = _options.MaxToolResultCharsKeep > 0 ? _options.MaxToolResultCharsKeep : 2500;
+        var maxSuccessMax = _options.MaxToolResultCharsSuccess > 0 ? _options.MaxToolResultCharsSuccess : 400;
+        var preserveRounds = _options.PreserveRecentToolRounds > 0 ? _options.PreserveRecentToolRounds : 2;
 
         var rounds = new List<(int AssistantIndex, int StartIndex, int EndIndex)>();
         for (int i = 0; i < messages.Count; i++)
@@ -45,8 +58,8 @@ public class AgentRunner : IAgentRunner
         }
 
         var keep = new HashSet<int>(Enumerable.Range(
-            Math.Max(0, rounds.Count - preserveRecentToolRounds),
-            Math.Min(preserveRecentToolRounds, rounds.Count)));
+            Math.Max(0, rounds.Count - preserveRounds),
+            Math.Min(preserveRounds, rounds.Count)));
 
         var result = new List<ApiMessage>(messages.Count);
         int roundIdx = 0;
@@ -86,7 +99,7 @@ public class AgentRunner : IAgentRunner
                 }
                 else
                 {
-                    messages[i] = messages[i] with { Content = c[..400] + $"\n[... {c.Length - 400} chars truncated by context limit ...]" };
+                    messages[i] = messages[i] with { Content = c[..maxSuccessMax] + $"\n[... {c.Length - maxSuccessMax} chars truncated by context limit ...]" };
                 }
             }
         }
@@ -112,12 +125,33 @@ public class AgentRunner : IAgentRunner
         var toolLog = new List<string>();
         UsageInfo? totalUsage = null;
 
+        var maxIterations = _options.MaxIterations > 0 ? _options.MaxIterations : 15;
+        var loopWindow = _options.LoopDetectionWindow > 0 ? _options.LoopDetectionWindow : 2;
+        var recentFingerprints = new Queue<string>(loopWindow);
+
+        int iteration = 0;
+        AgentChatResponse? lastResponse = null;
+
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            iteration++;
+
+            if (iteration > maxIterations)
+            {
+                var msg = $"Достигнут лимит в {maxIterations} итераций. Выполнение прервано.";
+                _logger.LogWarning("[Agent:{Agent}] MaxIterations reached ({Max}).", agent.GetType().Name, maxIterations);
+                toolLog.Add($"⚠️ [Agent] Прерывание — {msg}");
+                return new AgentRunnerResult(
+                    msg + " Возможно, инструменты работают некорректно или задача слишком сложна для автоматического решения.",
+                    toolLog,
+                    totalUsage,
+                    lastResponse?.ReasoningContent);
+            }
 
             CompactMessages(messages);
             var response = await _chatService.ChatWithMessagesAsync(messages, tools, model, cancellationToken);
+            lastResponse = response;
             totalUsage = AddUsage(totalUsage, response.Usage);
 
             if (response.ToolCalls.Count == 0)
@@ -125,9 +159,16 @@ public class AgentRunner : IAgentRunner
                 var content = CleanContent(response.Content?.Trim() ?? "");
                 if (string.IsNullOrEmpty(content) && toolLog.Count > 0)
                 {
-                    var (summaryContent, summaryUsage) = await RequestSummarizationAsync(messages, model, toolLog, cancellationToken);
-                    totalUsage = AddUsage(totalUsage, summaryUsage);
-                    content = CleanContent(summaryContent);
+                    try
+                    {
+                        var (summaryContent, summaryUsage) = await RequestSummarizationAsync(messages, model, toolLog, cancellationToken);
+                        totalUsage = AddUsage(totalUsage, summaryUsage);
+                        content = CleanContent(summaryContent);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Summarization fallback failed");
+                    }
                 }
                 return new AgentRunnerResult(
                     string.IsNullOrEmpty(content) ? "Извини, не смог подготовить ответ. Попробуй переформулировать вопрос." : content,
@@ -136,20 +177,50 @@ public class AgentRunner : IAgentRunner
                     response.ReasoningContent);
             }
 
-            var executed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-            messages.Add(new ApiMessage("assistant", string.IsNullOrEmpty(response.Content) ? null : response.Content,
-                ToolCalls: response.ToolCalls.Select(tc => new ApiToolCall(tc.Id, "function", new ApiFunctionCall(tc.Name, tc.ArgumentsJson))).ToList()));
-
+            // Build fingerprint BEFORE any tool side-effect so loop detection short-circuits cheaply.
+            var iterationKeys = new List<string>(response.ToolCalls.Count);
             foreach (var tc in response.ToolCalls)
             {
-                var key = $"{tc.Name}:{tc.ArgumentsJson}";
+                var normalizedArgs = WhitespaceRegex.Replace(tc.ArgumentsJson ?? "", "");
+                iterationKeys.Add($"{tc.Name}:{normalizedArgs}");
+            }
+            iterationKeys.Sort(StringComparer.Ordinal);
+            var currentFingerprint = string.Join("||", iterationKeys);
 
-                if (!executed.TryGetValue(key, out var result))
+            if (recentFingerprints.Contains(currentFingerprint))
+            {
+                var msg = "Агент зациклился на одинаковых вызовах инструментов. Выполнение прерывается.";
+                _logger.LogWarning(
+                    "[Agent:{Agent}] Loop detected. Fingerprint: {Fingerprint}",
+                    agent.GetType().Name, Truncate(currentFingerprint, 200));
+                toolLog.Add($"🔁 [Agent] Зацикливание — {msg}");
+                return new AgentRunnerResult(
+                    msg + " Попробуй переформулировать запрос или изменить подход.",
+                    toolLog,
+                    totalUsage,
+                    response.ReasoningContent);
+            }
+
+            recentFingerprints.Enqueue(currentFingerprint);
+            while (recentFingerprints.Count > loopWindow)
+                recentFingerprints.Dequeue();
+
+            // Assistant turn with all announced tool calls (triggers fingerprint disclosure to LLM).
+            messages.Add(new ApiMessage("assistant", string.IsNullOrEmpty(response.Content) ? null : response.Content,
+                ToolCalls: response.ToolCalls.Select(tc => new ApiToolCall(tc.Id, "function", new ApiFunctionCall(tc.Name, tc.ArgumentsJson ?? ""))).ToList()));
+
+            // Execute tools and append results.
+            var executed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var tc in response.ToolCalls)
+            {
+                var args = tc.ArgumentsJson ?? "{}";
+                var execKey = $"{tc.Name}:{args}";
+
+                if (!executed.TryGetValue(execKey, out var result))
                 {
-                    result = await ExecuteToolAsync(agent, tc.Name, tc.ArgumentsJson, cancellationToken);
-                    executed[key] = result;
-                    var formatted = FormatToolLogEntry(tc.Name, tc.ArgumentsJson, result);
+                    result = await ExecuteToolAsync(agent, tc.Name, args, cancellationToken);
+                    executed[execKey] = result;
+                    var formatted = FormatToolLogEntry(tc.Name, args, result);
                     toolLog.Add(formatted);
                 }
 
@@ -223,4 +294,7 @@ public class AgentRunner : IAgentRunner
         var result = await handler.ExecuteAsync(argumentsJson, ct);
         return result ?? $"Ошибка выполнения {name}";
     }
+
+    private static string Truncate(string s, int max)
+        => s.Length <= max ? s : s[..max] + "…";
 }

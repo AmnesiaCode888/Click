@@ -11,6 +11,7 @@ public class OpenAiChatService : IChatService
 {
     private readonly HttpClient _httpClient;
     private readonly OpenAiOptions _options;
+    private readonly SemaphoreSlim _modelsCacheLock = new(1, 1);
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -33,9 +34,26 @@ public class OpenAiChatService : IChatService
 
     public async Task<string[]> GetAvailableModelsAsync(CancellationToken cancellationToken = default)
     {
-        if (_cachedModels != null && DateTimeOffset.Now < _cacheExpiresAt)
+        // Double-checked locking pattern: read fast without lock, then re-check under semaphore on miss.
+        if (_cachedModels != null && DateTimeOffset.UtcNow < _cacheExpiresAt)
             return _cachedModels;
 
+        await _modelsCacheLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_cachedModels != null && DateTimeOffset.UtcNow < _cacheExpiresAt)
+                return _cachedModels;
+
+            return await FetchModelsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _modelsCacheLock.Release();
+        }
+    }
+
+    private async Task<string[]> FetchModelsAsync(CancellationToken cancellationToken)
+    {
         try
         {
             var url = _options.BaseUrl.TrimEnd('/') + "/models";
@@ -62,7 +80,7 @@ public class OpenAiChatService : IChatService
                         list.Add(id.GetString()!);
                 }
                 _cachedModels = list.ToArray();
-                _cacheExpiresAt = DateTimeOffset.Now.AddMinutes(5);
+                _cacheExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
                 return _cachedModels;
             }
         }

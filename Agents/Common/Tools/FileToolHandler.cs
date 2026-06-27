@@ -3,16 +3,24 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using AgentSharp;
 using Click;
+using Microsoft.Extensions.Logging;
 
 namespace Click.Agents.Common.Tools;
 
 public class FileToolHandler : IToolHandler
 {
     private readonly string _basePath;
+    private readonly ILogger<FileToolHandler> _logger;
+    private readonly FileToolOptions _options;
 
-    public FileToolHandler(ClickWorkspaceOptions options)
+    public FileToolHandler(
+        ClickWorkspaceOptions workspaceOptions,
+        ILogger<FileToolHandler> logger,
+        FileToolOptions options)
     {
-        _basePath = options.GetResolvedBasePath();
+        _basePath = workspaceOptions.GetResolvedBasePath();
+        _logger = logger;
+        _options = options;
     }
 
     public Task<string?> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
@@ -21,26 +29,36 @@ public class FileToolHandler : IToolHandler
         {
             var args = JsonSerializer.Deserialize<FileArgs>(argumentsJson);
             if (args == null)
-                return Task.FromResult<string?>("Ошибка: неверные аргументы");
+                return Task.FromResult<string?>(ToolResultFormatter.Error("Ошибка file", "неверные аргументы", "проверь формат JSON"));
 
             var action = args.Action?.ToLowerInvariant();
             if (string.IsNullOrWhiteSpace(action))
-                return Task.FromResult<string?>(FormatFileError("укажите action", "доступные действия: read, list, write, append, delete, edit, create_dir, delete_dir, move, copy"));
+                return Task.FromResult<string?>(ToolResultFormatter.Error(
+                    "Ошибка file", "укажите action",
+                    "доступные действия: read, list, write, append, delete, edit, create_dir, delete_dir, move, copy"));
 
             var path = string.IsNullOrWhiteSpace(args.Path) && action == "list" ? "." : args.Path;
             if (string.IsNullOrWhiteSpace(path) && action is not "list")
-                return Task.FromResult<string?>(FormatFileError("укажите path", "используй относительный путь внутри рабочей директории, например: Program.cs или Agents/Common"));
+                return Task.FromResult<string?>(ToolResultFormatter.Error(
+                    "Ошибка file", "укажите path",
+                    "используй относительный путь внутри рабочей директории, например: Program.cs или Agents/Common"));
 
             var safePath = ResolveSafePath(path ?? ".");
             if (safePath == null)
-                return Task.FromResult<string?>(FormatFileError($"путь '{path}' выходит за пределы рабочей директории или некорректен", "используй относительные пути внутри рабочей директории; абсолютные пути и выход за пределы запрещены"));
+                return Task.FromResult<string?>(ToolResultFormatter.Error(
+                    "Ошибка file",
+                    $"путь '{path}' выходит за пределы рабочей директории или некорректен",
+                    "используй относительные пути внутри рабочей директории; абсолютные пути и выход за пределы запрещены"));
 
             string? safeDest = null;
             if (!string.IsNullOrWhiteSpace(args.DestPath))
             {
                 safeDest = ResolveSafePath(args.DestPath);
                 if (safeDest == null)
-                    return Task.FromResult<string?>(FormatFileError($"dest_path '{args.DestPath}' выходит за пределы рабочей директории", "используй относительные пути внутри рабочей директории"));
+                    return Task.FromResult<string?>(ToolResultFormatter.Error(
+                        "Ошибка file",
+                        $"dest_path '{args.DestPath}' выходит за пределы рабочей директории",
+                        "используй относительные пути внутри рабочей директории"));
             }
 
             return action switch
@@ -53,14 +71,23 @@ public class FileToolHandler : IToolHandler
                 "edit" => Task.FromResult<string?>(LogAndExecute("Edit", safePath, () => EditBlock(safePath, args.Content ?? ""))),
                 "create_dir" => Task.FromResult<string?>(LogAndExecute("CreateDir", safePath, () => CreateDir(safePath))),
                 "delete_dir" => Task.FromResult<string?>(LogAndExecute("DeleteDir", safePath, () => DeleteDir(safePath, args.Recursive ?? false))),
-                "move" => Task.FromResult<string?>(safeDest != null ? LogAndExecute("Move", $"{safePath} -> {safeDest}", () => Move(safePath, safeDest)) : FormatFileError("укажите dest_path", "для move требуется dest_path")),
-                "copy" => Task.FromResult<string?>(safeDest != null ? LogAndExecute("Copy", $"{safePath} -> {safeDest}", () => Copy(safePath, safeDest)) : FormatFileError("укажите dest_path", "для copy требуется dest_path")),
-                _ => Task.FromResult<string?>(FormatFileError($"неизвестный action '{args.Action}'", "доступные действия: read, list, write, append, delete, edit, create_dir, delete_dir, move, copy"))
+                "move" => Task.FromResult<string?>(safeDest != null ? LogAndExecute("Move", $"{safePath} -> {safeDest}", () => Move(safePath, safeDest)) : ToolResultFormatter.Error("Ошибка file", "укажите dest_path", "для move требуется dest_path")),
+                "copy" => Task.FromResult<string?>(safeDest != null ? LogAndExecute("Copy", $"{safePath} -> {safeDest}", () => Copy(safePath, safeDest)) : ToolResultFormatter.Error("Ошибка file", "укажите dest_path", "для copy требуется dest_path")),
+                _ => Task.FromResult<string?>(ToolResultFormatter.Error(
+                    "Ошибка file", $"неизвестный action '{args.Action}'",
+                    "доступные действия: read, list, write, append, delete, edit, create_dir, delete_dir, move, copy"))
             };
+        }
+        catch (JsonException ex)
+        {
+            return Task.FromResult<string?>(ToolResultFormatter.Error(
+                "Ошибка file", "некорректный JSON в arguments: " + ex.Message,
+                "проверь формат JSON и имена полей"));
         }
         catch (Exception ex)
         {
-            return Task.FromResult<string?>(FormatFileError(ex.Message, "проверь корректность аргументов и пути"));
+            return Task.FromResult<string?>(ToolResultFormatter.Error(
+                "Ошибка file", ex.Message, "проверь корректность аргументов и пути"));
         }
     }
 
@@ -78,23 +105,16 @@ public class FileToolHandler : IToolHandler
 
     private string LogAndExecute(string operation, string path, Func<string> action)
     {
-        Console.WriteLine($"[File:{operation}] {path}");
+        _logger.LogInformation("[File:{Operation}] {Path}", operation, path);
         return action();
-    }
-
-    private static string FormatFileError(string message, string? hint)
-    {
-        var sb = new StringBuilder();
-        sb.Append($"Ошибка file: {message}");
-        if (!string.IsNullOrEmpty(hint))
-            sb.Append($". Подсказка: {hint}");
-        return sb.ToString();
     }
 
     private static string List(string path)
     {
         if (!Directory.Exists(path))
-            return FormatFileError($"директория '{Path.GetFileName(path)}' не найдена", "проверь путь или используй list для родительской директории");
+            return ToolResultFormatter.Error(
+                "Ошибка file", $"директория '{Path.GetFileName(path)}' не найдена",
+                "проверь путь или используй list для родительской директории");
         var items = Directory.GetFileSystemEntries(path)
             .Where(p => !Path.GetFileName(p).StartsWith("."))
             .Select(p => (Path.GetFileName(p) ?? "") + (Directory.Exists(p) ? "/" : ""))
@@ -102,10 +122,12 @@ public class FileToolHandler : IToolHandler
         return string.Join("\n", items);
     }
 
-    private static string Read(string path, int? offset = null, int? limit = null)
+    private string Read(string path, int? offset = null, int? limit = null)
     {
         if (!File.Exists(path))
-            return FormatFileError($"файл '{Path.GetFileName(path)}' не найден", "сначала получи список файлов через list");
+            return ToolResultFormatter.Error(
+                "Ошибка file", $"файл '{Path.GetFileName(path)}' не найден",
+                "сначала получи список файлов через list");
 
         var lines = File.ReadAllLines(path, Encoding.UTF8);
         var totalLines = lines.Length;
@@ -113,7 +135,8 @@ public class FileToolHandler : IToolHandler
         if (offset.HasValue || limit.HasValue)
         {
             var start = Math.Max(0, (offset ?? 1) - 1);
-            var count = Math.Min(limit ?? 250, lines.Length - start);
+            var defaultLimit = _options.DefaultReadLimit > 0 ? _options.DefaultReadLimit : 250;
+            var count = Math.Min(limit ?? defaultLimit, lines.Length - start);
             if (start >= lines.Length)
                 return $"Запрошенный offset за пределами файла (всего строк: {totalLines})";
 
@@ -124,7 +147,7 @@ public class FileToolHandler : IToolHandler
             return $"{prefix}{result}{suffix}";
         }
 
-        const int maxChars = 12000;
+        var maxChars = _options.MaxReadChars > 0 ? _options.MaxReadChars : 12000;
         var content = File.ReadAllText(path, Encoding.UTF8);
         if (content.Length <= maxChars)
             return content;
@@ -145,7 +168,9 @@ public class FileToolHandler : IToolHandler
     private static string Append(string path, string content)
     {
         if (!File.Exists(path))
-            return FormatFileError($"файл '{Path.GetFileName(path)}' не найден", "используй write для создания файла");
+            return ToolResultFormatter.Error(
+                "Ошибка file", $"файл '{Path.GetFileName(path)}' не найден",
+                "используй write для создания файла");
         File.AppendAllText(path, content, Encoding.UTF8);
         return $"Добавлено {content.Length} символов в конец {Path.GetFileName(path)}";
     }
@@ -153,7 +178,9 @@ public class FileToolHandler : IToolHandler
     private static string Delete(string path)
     {
         if (!File.Exists(path))
-            return FormatFileError($"файл '{Path.GetFileName(path)}' не найден", "проверь путь через list");
+            return ToolResultFormatter.Error(
+                "Ошибка file", $"файл '{Path.GetFileName(path)}' не найден",
+                "проверь путь через list");
         File.Delete(path);
         return $"Удалён {Path.GetFileName(path)}";
     }
@@ -161,9 +188,13 @@ public class FileToolHandler : IToolHandler
     private static string EditBlock(string path, string content)
     {
         if (!File.Exists(path))
-            return FormatFileError($"файл '{Path.GetFileName(path)}' не найден", "сначала прочитай файл через read");
+            return ToolResultFormatter.Error(
+                "Ошибка file", $"файл '{Path.GetFileName(path)}' не найден",
+                "сначала прочитай файл через read");
         if (string.IsNullOrEmpty(content))
-            return FormatFileError("укажи content с SEARCH/REPLACE блоками", "используй точный текст из файла");
+            return ToolResultFormatter.Error(
+                "Ошибка file", "укажи content с SEARCH/REPLACE блоками",
+                "используй точный текст из файла");
 
         if (!content.Contains("<<<<<<< SEARCH"))
         {
@@ -174,7 +205,9 @@ public class FileToolHandler : IToolHandler
 
         var blocks = ParseSearchReplaceBlocks(content);
         if (blocks.Count == 0)
-            return FormatFileError("неверный формат SEARCH/REPLACE", "используй:\n<<<<<<< SEARCH\nстарый код\n=======\nновый код\n>>>>>>> REPLACE\n\nИли упрощенный:\nстарый код\n---\nновый код");
+            return ToolResultFormatter.Error(
+                "Ошибка file", "неверный формат SEARCH/REPLACE",
+                "используй:\n<<<<<<< SEARCH\nстарый код\n=======\nновый код\n>>>>>>> REPLACE\n\nИли упрощенный:\nстарый код\n---\nновый код");
 
         string lastResult = "";
         foreach (var (search, replace) in blocks)
@@ -311,7 +344,10 @@ public class FileToolHandler : IToolHandler
     private static string CreateDir(string path)
     {
         if (Directory.Exists(path))
-            return FormatFileError($"директория '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}' уже существует", "используй существующую директорию");
+            return ToolResultFormatter.Error(
+                "Ошибка file",
+                $"директория '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}' уже существует",
+                "используй существующую директорию");
         Directory.CreateDirectory(path);
         return $"Создана папка {Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}";
     }
@@ -319,9 +355,14 @@ public class FileToolHandler : IToolHandler
     private static string DeleteDir(string path, bool recursive)
     {
         if (!Directory.Exists(path))
-            return FormatFileError($"папка '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}' не найдена", "проверь путь через list");
+            return ToolResultFormatter.Error(
+                "Ошибка file",
+                $"папка '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}' не найдена",
+                "проверь путь через list");
         if (!recursive && Directory.EnumerateFileSystemEntries(path).Any())
-            return FormatFileError("папка не пуста", "укажи recursive: true для удаления с содержимым");
+            return ToolResultFormatter.Error(
+                "Ошибка file", "папка не пуста",
+                "укажи recursive: true для удаления с содержимым");
         Directory.Delete(path, recursive);
         return $"Удалена папка {Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}";
     }
@@ -339,11 +380,15 @@ public class FileToolHandler : IToolHandler
         if (Directory.Exists(source))
         {
             if (Directory.Exists(dest) || File.Exists(dest))
-                return FormatFileError("путь назначения уже существует", "выбери другое имя или удалите существующий файл/папку");
+                return ToolResultFormatter.Error(
+                    "Ошибка file", "путь назначения уже существует",
+                    "выбери другое имя или удалите существующий файл/папку");
             Directory.Move(source, dest);
             return $"Папка перемещена в {Path.GetFileName(dest.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}";
         }
-        return FormatFileError($"источник '{Path.GetFileName(source)}' не найден", "проверь путь через list");
+        return ToolResultFormatter.Error(
+            "Ошибка file", $"источник '{Path.GetFileName(source)}' не найден",
+            "проверь путь через list");
     }
 
     private static string Copy(string source, string dest)
@@ -361,7 +406,9 @@ public class FileToolHandler : IToolHandler
             CopyDirectory(source, dest);
             return $"Папка скопирована в {Path.GetFileName(dest.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))}";
         }
-        return FormatFileError($"источник '{Path.GetFileName(source)}' не найден", "проверь путь через list");
+        return ToolResultFormatter.Error(
+            "Ошибка file", $"источник '{Path.GetFileName(source)}' не найден",
+            "проверь путь через list");
     }
 
     private static void CopyDirectory(string source, string dest)
@@ -374,33 +421,41 @@ public class FileToolHandler : IToolHandler
     }
 }
 
-public class FileArgs
+public class FileToolOptions
+{
+    public const string SectionName = "File";
+
+    public int MaxReadChars { get; set; } = 12000;
+    public int DefaultReadLimit { get; set; } = 250;
+}
+
+public record FileArgs
 {
     [JsonPropertyName("action")]
     [ToolParameter(Type = "string", Description = "read | list | write | append | delete | edit | create_dir | delete_dir | move | copy", Required = true, Enum = new[] { "read", "list", "write", "append", "delete", "edit", "create_dir", "delete_dir", "move", "copy" })]
-    public string? Action { get; set; }
+    public string? Action { get; init; }
 
     [JsonPropertyName("path")]
     [ToolParameter(Type = "string", Description = "Относительный путь к файлу/папке")]
-    public string? Path { get; set; }
+    public string? Path { get; init; }
 
     [JsonPropertyName("dest_path")]
     [ToolParameter(Type = "string", Description = "Путь назначения для move/copy")]
-    public string? DestPath { get; set; }
+    public string? DestPath { get; init; }
 
     [JsonPropertyName("content")]
     [ToolParameter(Type = "string", Description = "Код файла (write/append) или SEARCH/REPLACE блок (edit)")]
-    public string? Content { get; set; }
+    public string? Content { get; init; }
 
     [JsonPropertyName("offset")]
     [ToolParameter(Type = "number", Description = "Для read: начальная строка (1-based)")]
-    public int? Offset { get; set; }
+    public int? Offset { get; init; }
 
     [JsonPropertyName("limit")]
     [ToolParameter(Type = "number", Description = "Для read: макс. строк (по умолчанию 250)")]
-    public int? Limit { get; set; }
+    public int? Limit { get; init; }
 
     [JsonPropertyName("recursive")]
     [ToolParameter(Type = "boolean", Description = "Для delete_dir: удалить с содержимым")]
-    public bool? Recursive { get; set; }
+    public bool? Recursive { get; init; }
 }

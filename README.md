@@ -216,6 +216,71 @@ dotnet publish Click.csproj -c Release -o ./out
 
 > Инструмент `search` добавляется только при наличии `Serper:ApiKey`.
 
+### Настройка логирования / Logging
+
+Уровень логирования задаётся в секции `Logging` того же `appsettings.json`. По умолчанию подробные HTTP-логи от `System.Net.Http.HttpClient` отключены, а логи инструментов (`file`, `terminal`, `search`, `web_read`) остаются видимыми.
+
+```json
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft": "Warning",
+      "System.Net.Http.HttpClient": "Error"
+    }
+  }
+}
+```
+
+Чтобы временно включить детальное логирование HTTP-запросов, измените уровень `System.Net.Http.HttpClient` на `Information` или `Debug`.
+
+### Настройка агента и инструментов / Agent and Tool Configuration
+
+Поведение агента и инструментов полностью конфигурируется через `appsettings.json` (или `appsettings.Development.json`).
+
+```json
+{
+  "Agent": {
+    "MaxIterations": 15,
+    "LoopDetectionWindow": 2,
+    "MaxToolResultCharsKeep": 2500,
+    "MaxToolResultCharsSuccess": 400,
+    "PreserveRecentToolRounds": 2
+  },
+  "Chat": {
+    "MaxHistoryMessages": 20,
+    "MaxHistoryChars": 25000
+  },
+  "File": {
+    "MaxReadChars": 12000,
+    "DefaultReadLimit": 250
+  },
+  "Search": {
+    "DefaultMaxResults": 5,
+    "MinMaxResults": 1,
+    "MaxMaxResults": 20
+  },
+  "WebRead": {
+    "DefaultMaxLength": 8000
+  },
+  "Terminal": {
+    "DefaultTimeoutSeconds": 60,
+    "MinTimeoutSeconds": 1,
+    "MaxTimeoutSeconds": 300,
+    "MaxOutputChars": 6000
+  }
+}
+```
+
+| Секция / Section | Описание / Description |
+|---|---|
+| `Agent` | `MaxIterations` — максимальное число итераций ReAct-цикла; `LoopDetectionWindow` — окно детекции повторяющихся вызовов инструментов; `MaxToolResultCharsKeep` / `MaxToolResultCharsSuccess` — лимиты длины результатов инструментов в истории; `PreserveRecentToolRounds` — сколько последних tool-раундов сохранять полностью. / `MaxIterations` limits the ReAct loop; `LoopDetectionWindow` detects repeated tool calls; result size limits control history compaction. |
+| `Chat` | `MaxHistoryMessages` — максимальное число сообщений в истории; `MaxHistoryChars` — максимальное число символов. / `MaxHistoryMessages` and `MaxHistoryChars` cap the chat history sent to the LLM. |
+| `File` | `MaxReadChars` — максимальный размер читаемого файла; `DefaultReadLimit` — лимит строк по умолчанию. / `MaxReadChars` caps file size; `DefaultReadLimit` is the default line limit. |
+| `Search` | `DefaultMaxResults` — число результатов по умолчанию; `MinMaxResults` / `MaxMaxResults` — допустимые границы, запрашиваемые у агента. / `DefaultMaxResults` and min/max bounds for search result count. |
+| `WebRead` | `DefaultMaxLength` — максимальная длина извлекаемого текста веб-страницы. / `DefaultMaxLength` caps extracted web page text. |
+| `Terminal` | `DefaultTimeoutSeconds` — таймаут команды по умолчанию; `MinTimeoutSeconds` / `MaxTimeoutSeconds` — допустимые границы; `MaxOutputChars` — максимальная длина вывода, сохраняемого в историю. / `DefaultTimeoutSeconds`, min/max timeout bounds and `MaxOutputChars` cap. |
+
 ### Где хранить секреты / Where to Store Secrets
 
 **Никогда не храните API-ключи в `appsettings.json`, который попадает в Git.**
