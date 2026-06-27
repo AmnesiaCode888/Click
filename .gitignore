@@ -1,0 +1,72 @@
+## .NET build output
+bin/
+obj/
+out/
+*.user
+*.suo
+*.userprefs
+*.cachefile
+*.dbmdl
+*.dbproj.schemaview
+*.jfm
+*.pfx
+*.publishsettings
+
+## Rider / VS / VS Code
+.idea/
+.vs/
+.vscode/
+*.swp
+*.swo
+
+## Test results
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.xml
+coverage*.info
+
+## NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+
+## Misc
+*.log
+*.tmp
+*.bak
+*.zip
+*.rar
+*.7z
+.DS_Store
+Thumbs.db
+
+## Secrets and local config
+appsettings.Development.json
+appsettings.Local.json
+*.env
+.env
+.env.local
+*.pem
+*.key
+*.crt
+*.pfx
+secrets.json
+credentials.json
+*.secret
+.ssh/
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+*.tokens
+*.credentials
+
+## Logs
+logs/
+*.log
