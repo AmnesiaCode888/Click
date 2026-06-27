@@ -68,7 +68,7 @@
 ### Структура проекта / Project Structure
 
 | Папка / Folder | Назначение / Purpose |
-|---|---|---|
+|---|---|
 | `AgentSharp/` | Базовый фреймворк: `IAgent`, `AgentBase`, `IAgentRunner`, `IChatService`, модели сообщений и инструментов, `ToolFactory`. / Base framework: agent abstractions, message/tool models, `ToolFactory`. |
 | `Agents/` | Конкретные агенты и их инструменты. Сейчас: `CodeAssistant`. / Concrete agents and their tools. Currently: `CodeAssistant`. |
 | `Agents/Common/Tools/` | Общие обработчики инструментов (`file`, `terminal`, `search`, `web_read`). / Common tool handlers. |
