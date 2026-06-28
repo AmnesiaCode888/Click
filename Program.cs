@@ -66,9 +66,30 @@ var runner = serviceProvider.GetRequiredService<IAgentRunner>();
 var options = serviceProvider.GetRequiredService<OpenAiOptions>();
 var chatOptions = serviceProvider.GetRequiredService<ClickChatOptions>();
 
+// Validate configuration
+var configErrors = new List<string>();
+if (string.IsNullOrWhiteSpace(options.ApiKey) && !options.Model.StartsWith("ollama/", StringComparison.OrdinalIgnoreCase) && !options.Model.StartsWith("lmstudio/", StringComparison.OrdinalIgnoreCase) && !options.Model.StartsWith("lm-studio/", StringComparison.OrdinalIgnoreCase))
+    configErrors.Add("API-ключ не настроен. Укажите OpenAi:ApiKey в appsettings.json или используйте локальную модель (ollama/lmstudio).");
+if (string.IsNullOrWhiteSpace(options.BaseUrl) && !options.Model.StartsWith("ollama/", StringComparison.OrdinalIgnoreCase) && !options.Model.StartsWith("lmstudio/", StringComparison.OrdinalIgnoreCase) && !options.Model.StartsWith("lm-studio/", StringComparison.OrdinalIgnoreCase))
+    configErrors.Add("BaseUrl не настроен. Укажите OpenAi:BaseUrl в appsettings.json.");
+if (string.IsNullOrWhiteSpace(options.Model))
+    configErrors.Add("Модель не указана. Укажите OpenAi:Model в appsettings.json.");
+
+if (configErrors.Count > 0)
+{
+    AnsiConsole.MarkupLine("[red]⚠ Ошибки конфигурации:[/]");
+    foreach (var err in configErrors)
+        AnsiConsole.MarkupLine($"[red]  ✗ {Markup.Escape(err)}[/]");
+    AnsiConsole.MarkupLine("\n[dim]Проверьте appsettings.json или appsettings.Development.json[/]");
+    return;
+}
+
+var workspaceDescription = BuildWorkspaceDescription(workspacePath);
+
 var metadata = new AgentMetadata(
     CurrentDateTime: DateTime.Now.ToString("dd.MM.yyyy HH:mm:ss"),
-    OperatingSystem: Environment.OSVersion.Platform.ToString() + " " + Environment.OSVersion.VersionString);
+    OperatingSystem: Environment.OSVersion.Platform.ToString() + " " + Environment.OSVersion.VersionString,
+    WorkspaceDescription: workspaceDescription);
 var context = new AgentContext(workspacePath, metadata);
 
 AnsiConsole.MarkupLine($"[bold cyan]{agent.Name}[/] — AI-ассистент для разработки");
@@ -109,19 +130,20 @@ while (!cts.Token.IsCancellationRequested)
         AnsiConsole.MarkupLine(stats);
 
         history.Add(new ChatMessage("user", input));
-        history.Add(new ChatMessage("assistant", result.Content, ReasoningContent: result.ReasoningContent));
+        history.Add(new ChatMessage("assistant", result.Content));
 
         var maxHistoryMessages = chatOptions.MaxHistoryMessages > 0 ? chatOptions.MaxHistoryMessages : 20;
         var maxHistoryChars = chatOptions.MaxHistoryChars > 0 ? chatOptions.MaxHistoryChars : 25000;
         if (history.Count > maxHistoryMessages)
             history.RemoveRange(0, history.Count - maxHistoryMessages);
 
+        // Remove pairs to avoid orphaned user/assistant messages
         int totalChars = 0;
         foreach (var m in history) totalChars += m.Content?.Length ?? 0;
-        while (totalChars > maxHistoryChars && history.Count > 2)
+        while (totalChars > maxHistoryChars && history.Count >= 4)
         {
-            totalChars -= history[0].Content?.Length ?? 0;
-            history.RemoveAt(0);
+            totalChars -= (history[0].Content?.Length ?? 0) + (history[1].Content?.Length ?? 0);
+            history.RemoveRange(0, 2);
         }
     }
     catch (OperationCanceledException)
@@ -156,6 +178,67 @@ static string? SelectWorkspace()
         "📂 Указать другую директорию" => PromptForCustomPath(),
         _ => null
     };
+}
+
+static string BuildWorkspaceDescription(string workspacePath)
+{
+    var sb = new System.Text.StringBuilder();
+    try
+    {
+        // Find .csproj files
+        var csprojFiles = Directory.GetFiles(workspacePath, "*.csproj", SearchOption.TopDirectoryOnly);
+        if (csprojFiles.Length > 0)
+        {
+            sb.AppendLine("Проекты:");
+            foreach (var csproj in csprojFiles)
+            {
+                var name = Path.GetFileName(csproj);
+                sb.AppendLine($"  - {name}");
+            }
+        }
+
+        // Find README
+        var readmeFiles = Directory.GetFiles(workspacePath, "README*", SearchOption.TopDirectoryOnly);
+        foreach (var readme in readmeFiles)
+        {
+            try
+            {
+                var content = File.ReadAllText(readme);
+                var firstLines = string.Join("\n", content.Split('\n').Take(15));
+                if (firstLines.Length > 600) firstLines = firstLines[..600] + "...";
+                sb.AppendLine($"\nREADME ({Path.GetFileName(readme)}):");
+                sb.AppendLine(firstLines);
+            }
+            catch { }
+            break; // Only read first README
+        }
+
+        // Top-level structure
+        var entries = Directory.GetFileSystemEntries(workspacePath)
+            .Where(e => !Path.GetFileName(e).StartsWith("."))
+            .OrderBy(e => Directory.Exists(e) ? 0 : 1)
+            .ThenBy(e => Path.GetFileName(e))
+            .ToList();
+
+        if (entries.Count > 0)
+        {
+            sb.AppendLine($"\nСтруктура корня ({entries.Count} элементов):");
+            foreach (var entry in entries.Take(30))
+            {
+                var name = Path.GetFileName(entry);
+                sb.AppendLine($"  {(Directory.Exists(entry) ? name + "/" : name)}");
+            }
+            if (entries.Count > 30)
+                sb.AppendLine($"  ... и ещё {entries.Count - 30} элементов");
+        }
+    }
+    catch (Exception ex)
+    {
+        sb.AppendLine($"(ошибка сканирования workspace: {ex.Message})");
+    }
+
+    var result = sb.ToString().Trim();
+    return string.IsNullOrEmpty(result) ? "(пустая директория)" : result;
 }
 
 static string? PromptForCustomPath()

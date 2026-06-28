@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 using AgentSharp;
 using Click;
 using Microsoft.Extensions.Logging;
@@ -23,71 +24,73 @@ public class FileToolHandler : IToolHandler
         _options = options;
     }
 
-    public Task<string?> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
+    public Task<ToolResult> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
     {
         try
         {
             var args = JsonSerializer.Deserialize<FileArgs>(argumentsJson);
             if (args == null)
-                return Task.FromResult<string?>(ToolResultFormatter.Error("Ошибка file", "неверные аргументы", "проверь формат JSON"));
+                return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error("Ошибка file", "неверные аргументы", "проверь формат JSON")));
 
             var action = args.Action?.ToLowerInvariant();
             if (string.IsNullOrWhiteSpace(action))
-                return Task.FromResult<string?>(ToolResultFormatter.Error(
+                return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
                     "Ошибка file", "укажите action",
-                    "доступные действия: read, list, write, append, delete, edit, create_dir, delete_dir, move, copy"));
+                    "доступные действия: read, list, glob, read_tree, write, append, delete, edit, create_dir, delete_dir, move, copy")));
 
             var path = string.IsNullOrWhiteSpace(args.Path) && action == "list" ? "." : args.Path;
             if (string.IsNullOrWhiteSpace(path) && action is not "list")
-                return Task.FromResult<string?>(ToolResultFormatter.Error(
+                return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
                     "Ошибка file", "укажите path",
-                    "используй относительный путь внутри рабочей директории, например: Program.cs или Agents/Common"));
+                    "используй относительный путь внутри рабочей директории, например: Program.cs или Agents/Common")));
 
             var safePath = ResolveSafePath(path ?? ".");
             if (safePath == null)
-                return Task.FromResult<string?>(ToolResultFormatter.Error(
+                return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
                     "Ошибка file",
                     $"путь '{path}' выходит за пределы рабочей директории или некорректен",
-                    "используй относительные пути внутри рабочей директории; абсолютные пути и выход за пределы запрещены"));
+                    "используй относительные пути внутри рабочей директории; абсолютные пути и выход за пределы запрещены")));
 
             string? safeDest = null;
             if (!string.IsNullOrWhiteSpace(args.DestPath))
             {
                 safeDest = ResolveSafePath(args.DestPath);
                 if (safeDest == null)
-                    return Task.FromResult<string?>(ToolResultFormatter.Error(
+                    return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
                         "Ошибка file",
                         $"dest_path '{args.DestPath}' выходит за пределы рабочей директории",
-                        "используй относительные пути внутри рабочей директории"));
+                        "используй относительные пути внутри рабочей директории")));
             }
 
             return action switch
             {
-                "read" => Task.FromResult<string?>(LogAndExecute("Read", safePath, () => Read(safePath, args.Offset, args.Limit))),
-                "list" => Task.FromResult<string?>(LogAndExecute("List", safePath, () => List(safePath))),
-                "write" => Task.FromResult<string?>(LogAndExecute("Write", safePath, () => Write(safePath, args.Content ?? ""))),
-                "append" => Task.FromResult<string?>(LogAndExecute("Append", safePath, () => Append(safePath, args.Content ?? ""))),
-                "delete" => Task.FromResult<string?>(LogAndExecute("Delete", safePath, () => Delete(safePath))),
-                "edit" => Task.FromResult<string?>(LogAndExecute("Edit", safePath, () => EditBlock(safePath, args.Content ?? ""))),
-                "create_dir" => Task.FromResult<string?>(LogAndExecute("CreateDir", safePath, () => CreateDir(safePath))),
-                "delete_dir" => Task.FromResult<string?>(LogAndExecute("DeleteDir", safePath, () => DeleteDir(safePath, args.Recursive ?? false))),
-                "move" => Task.FromResult<string?>(safeDest != null ? LogAndExecute("Move", $"{safePath} -> {safeDest}", () => Move(safePath, safeDest)) : ToolResultFormatter.Error("Ошибка file", "укажите dest_path", "для move требуется dest_path")),
-                "copy" => Task.FromResult<string?>(safeDest != null ? LogAndExecute("Copy", $"{safePath} -> {safeDest}", () => Copy(safePath, safeDest)) : ToolResultFormatter.Error("Ошибка file", "укажите dest_path", "для copy требуется dest_path")),
-                _ => Task.FromResult<string?>(ToolResultFormatter.Error(
+                "read" => Task.FromResult(WrapFileResult("Read", safePath, () => Read(safePath, args.Offset, args.Limit))),
+                "list" => Task.FromResult(WrapFileResult("List", safePath, () => List(safePath))),
+                "glob" => Task.FromResult(WrapFileResult("Glob", safePath + (string.IsNullOrEmpty(args.Pattern) ? "" : $" | {args.Pattern}"), () => Glob(safePath, args.Pattern))),
+                "read_tree" => Task.FromResult(WrapFileResult("ReadTree", safePath, () => ReadTree(safePath, args.MaxDepth))),
+                "write" => Task.FromResult(WrapFileResult("Write", safePath, () => Write(safePath, args.Content ?? ""))),
+                "append" => Task.FromResult(WrapFileResult("Append", safePath, () => Append(safePath, args.Content ?? ""))),
+                "delete" => Task.FromResult(WrapFileResult("Delete", safePath, () => Delete(safePath))),
+                "edit" => Task.FromResult(WrapFileResult("Edit", safePath, () => EditBlock(safePath, args.Content ?? ""))),
+                "create_dir" => Task.FromResult(WrapFileResult("CreateDir", safePath, () => CreateDir(safePath))),
+                "delete_dir" => Task.FromResult(WrapFileResult("DeleteDir", safePath, () => DeleteDir(safePath, args.Recursive ?? false))),
+                "move" => Task.FromResult(safeDest != null ? WrapFileResult("Move", $"{safePath} -> {safeDest}", () => Move(safePath, safeDest)) : ToolResult.FromString(ToolResultFormatter.Error("Ошибка file", "укажите dest_path", "для move требуется dest_path"))),
+                "copy" => Task.FromResult(safeDest != null ? WrapFileResult("Copy", $"{safePath} -> {safeDest}", () => Copy(safePath, safeDest)) : ToolResult.FromString(ToolResultFormatter.Error("Ошибка file", "укажите dest_path", "для copy требуется dest_path"))),
+                _ => Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
                     "Ошибка file", $"неизвестный action '{args.Action}'",
-                    "доступные действия: read, list, write, append, delete, edit, create_dir, delete_dir, move, copy"))
+                    "доступные действия: read, list, glob, read_tree, write, append, delete, edit, create_dir, delete_dir, move, copy")))
             };
         }
         catch (JsonException ex)
         {
-            return Task.FromResult<string?>(ToolResultFormatter.Error(
+            return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
                 "Ошибка file", "некорректный JSON в arguments: " + ex.Message,
-                "проверь формат JSON и имена полей"));
+                "проверь формат JSON и имена полей")));
         }
         catch (Exception ex)
         {
-            return Task.FromResult<string?>(ToolResultFormatter.Error(
-                "Ошибка file", ex.Message, "проверь корректность аргументов и пути"));
+            return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
+                "Ошибка file", ex.Message, "проверь корректность аргументов и пути")));
         }
     }
 
@@ -103,10 +106,163 @@ public class FileToolHandler : IToolHandler
         return full;
     }
 
-    private string LogAndExecute(string operation, string path, Func<string> action)
+    private ToolResult WrapFileResult(string operation, string path, Func<string> action)
     {
         _logger.LogInformation("[File:{Operation}] {Path}", operation, path);
-        return action();
+        var result = action();
+        return ToolResult.Structured(new { Operation = operation, Path = path, Result = result }, result);
+    }
+
+    private string Glob(string path, string? pattern)
+    {
+        if (string.IsNullOrWhiteSpace(pattern))
+            return ToolResultFormatter.Error(
+                "Ошибка file", "укажи pattern для glob",
+                "например: **/*.cs, Agents/**/*.cs, *.json");
+
+        var dir = Directory.Exists(path) ? path : Path.GetDirectoryName(path);
+        if (dir == null || !Directory.Exists(dir))
+            return ToolResultFormatter.Error(
+                "Ошибка file", $"директория не найдена для glob '{pattern}'",
+                "проверь путь или используй list для родительской директории");
+
+        var searchPattern = pattern;
+        var relativeRoot = dir;
+
+        // Handle ** patterns: search recursively from base directory
+        if (pattern.Contains("**"))
+        {
+            var parts = pattern.Split(["**"], StringSplitOptions.None);
+            if (parts.Length >= 2)
+            {
+                // If pattern starts with **, search from basePath recursively
+                if (pattern.StartsWith("**"))
+                {
+                    // Walk recursively and filter by the suffix pattern
+                    var suffix = parts[^1].TrimStart('/', '\\');
+                    relativeRoot = _basePath;
+                    var files = new List<string>();
+                    CollectGlobFiles(_basePath, _basePath, "**/" + suffix, files, int.MaxValue);
+                    if (files.Count == 0)
+                        return $"glob '{pattern}' не найдено совпадений";
+                    files.Sort(StringComparer.OrdinalIgnoreCase);
+                    return string.Join("\n", files.Take(100));
+                }
+
+                // Pattern like "Agents/**/*.cs" — walk from the first part
+                var prefix = parts[0].TrimEnd('/', '\\');
+                relativeRoot = Path.Combine(_basePath, prefix);
+                if (!Directory.Exists(relativeRoot))
+                    return ToolResultFormatter.Error(
+                        "Ошибка file", $"директория '{prefix}' не найдена",
+                        "проверь путь через list");
+                var suffix2 = parts[^1].TrimStart('/', '\\');
+                var files2 = new List<string>();
+                CollectGlobFiles(relativeRoot, _basePath, "**/" + suffix2, files2, int.MaxValue);
+                if (files2.Count == 0)
+                    return $"glob '{pattern}' не найдено совпадений";
+                files2.Sort(StringComparer.OrdinalIgnoreCase);
+                return string.Join("\n", files2.Take(100));
+            }
+        }
+
+        // Simple glob without **
+        var results = new List<string>();
+        try
+        {
+            var matchedFiles = Directory.GetFiles(relativeRoot, searchPattern, SearchOption.TopDirectoryOnly);
+            results.AddRange(matchedFiles.Select(f => Path.GetRelativePath(_basePath, f)));
+            var matchedDirs = Directory.GetDirectories(relativeRoot, searchPattern, SearchOption.TopDirectoryOnly);
+            results.AddRange(matchedDirs.Select(d => Path.GetRelativePath(_basePath, d) + "/"));
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return ToolResultFormatter.Error("Ошибка file", $"директория не найдена для glob", "проверь путь");
+        }
+
+        if (results.Count == 0)
+            return $"glob '{pattern}' не найдено совпадений";
+        results.Sort(StringComparer.OrdinalIgnoreCase);
+        return string.Join("\n", results.Take(100));
+    }
+
+    private void CollectGlobFiles(string dir, string basePath, string relativePattern, List<string> results, int maxDepth, int currentDepth = 0)
+    {
+        if (currentDepth >= maxDepth || results.Count >= 200) return;
+        try
+        {
+            foreach (var file in Directory.GetFiles(dir))
+            {
+                var relPath = Path.GetRelativePath(basePath, file);
+                var fileName = Path.GetFileName(file);
+                if (MatchesSimplePattern(fileName, relativePattern))
+                    results.Add(relPath);
+            }
+            foreach (var subDir in Directory.GetDirectories(dir))
+            {
+                var dirName = Path.GetFileName(subDir);
+                if (!dirName.StartsWith("."))
+                    CollectGlobFiles(subDir, basePath, relativePattern, results, maxDepth, currentDepth + 1);
+            }
+        }
+        catch { }
+    }
+
+    private static bool MatchesSimplePattern(string name, string pattern)
+    {
+        // Extract the file pattern part from "**/pattern"
+        var filePattern = pattern;
+        var slashIdx = pattern.LastIndexOf('/');
+        if (slashIdx >= 0) filePattern = pattern[(slashIdx + 1)..];
+
+        // Simple wildcard matching (* and ?)
+        var regex = "^" + Regex.Escape(filePattern).Replace("\\*", ".*").Replace("\\?", ".") + "$";
+        return Regex.IsMatch(name, regex, RegexOptions.IgnoreCase);
+    }
+
+    private static string ReadTree(string path, int? maxDepth = null)
+    {
+        if (!Directory.Exists(path))
+            return ToolResultFormatter.Error(
+                "Ошибка file", $"директория '{Path.GetFileName(path)}' не найдена",
+                "проверь путь через list");
+
+        var depth = Math.Clamp(maxDepth ?? 3, 1, 10);
+        var sb = new StringBuilder();
+        BuildTree(path, "", 0, depth, sb);
+        return sb.Length > 0 ? sb.ToString() : "(пустая директория)";
+    }
+
+    private static void BuildTree(string dir, string indent, int currentDepth, int maxDepth, StringBuilder sb)
+    {
+        if (currentDepth >= maxDepth) return;
+        try
+        {
+            var entries = Directory.GetFileSystemEntries(dir)
+                .Where(e => !Path.GetFileName(e).StartsWith("."))
+                .OrderBy(e => Directory.Exists(e) ? 0 : 1)
+                .ThenBy(e => Path.GetFileName(e), StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var isLast = i == entries.Count - 1;
+                var name = Path.GetFileName(entries[i]);
+                var prefix = isLast ? "└── " : "├── ";
+                var childIndent = isLast ? "    " : "│   ";
+
+                if (Directory.Exists(entries[i]))
+                {
+                    sb.AppendLine($"{indent}{prefix}{name}/");
+                    BuildTree(entries[i], indent + childIndent, currentDepth + 1, maxDepth, sb);
+                }
+                else
+                {
+                    sb.AppendLine($"{indent}{prefix}{name}");
+                }
+            }
+        }
+        catch { }
     }
 
     private static string List(string path)
@@ -143,7 +299,8 @@ public class FileToolHandler : IToolHandler
             var slice = lines.Skip(start).Take(count).ToList();
             var result = string.Join("\n", slice);
             var prefix = start > 0 ? $"[... {start} строк пропущено ...]\n" : "";
-            var suffix = (start + count) < totalLines ? $"\n[... {totalLines - start - count} строк осталось ...]" : "";
+            var nextOffset = start + count + 1;
+            var suffix = (start + count) < totalLines ? $"\n[... {totalLines - start - count} строк осталось. Для продолжения: read с offset={nextOffset} limit={count} ...]" : "";
             return $"{prefix}{result}{suffix}";
         }
 
@@ -153,7 +310,7 @@ public class FileToolHandler : IToolHandler
             return content;
 
         var half = maxChars / 2;
-        return content[..half] + $"\n\n[... {content.Length - maxChars} символов пропущено (читай с offset/limit) ...]\n\n" + content[^half..];
+        return content[..half] + $"\n\n[... {content.Length - maxChars} символов пропущено. Используй file read с offset=1 limit=250 для постраничного чтения ...]\n\n" + content[^half..];
     }
 
     private static string Write(string path, string content)
@@ -255,7 +412,8 @@ public class FileToolHandler : IToolHandler
         {
             var result = content[..idx] + replaceText + content[(idx + searchText.Length)..];
             File.WriteAllText(path, result, Encoding.UTF8);
-            return $"✓ Успешно заменено в {fileName}";
+            var contextAfter = ShowReplacedContext(result, fileName, idx, replaceText);
+            return contextAfter;
         }
 
         var searchNormalized = NormalizeWhitespace(searchText);
@@ -268,7 +426,7 @@ public class FileToolHandler : IToolHandler
             if (result != null)
             {
                 File.WriteAllText(path, result, Encoding.UTF8);
-                return $"✓ Успешно заменено в {fileName} (с нормализацией пробелов)";
+                return $"✓ Успешно заменено в {fileName} (с нормализацией пробелов). Перечитай изменённый участок через file read для проверки.";
             }
         }
 
@@ -290,6 +448,33 @@ public class FileToolHandler : IToolHandler
         }
 
         return errorMsg;
+    }
+
+    private static string ShowReplacedContext(string newContent, string fileName, int replacementIndex, string replaceText)
+    {
+        var lines = newContent.Split('\n');
+        var replaceLines = replaceText.Split('\n');
+
+        // Count newlines before replacementIndex to find the line number
+        int newlines = 0;
+        for (int i = 0; i < replacementIndex && i < newContent.Length; i++)
+            if (newContent[i] == '\n') newlines++;
+        var lineNumber = newlines + 1;
+
+        // Show ±3 lines around the replaced block
+        var contextStart = Math.Max(0, lineNumber - 1 - 3);
+        var contextEnd = Math.Min(lines.Length, lineNumber - 1 + replaceLines.Length + 3);
+        var contextLines = new List<string>();
+
+        for (int i = contextStart; i < contextEnd; i++)
+        {
+            var marker = (i >= lineNumber - 1 && i < lineNumber - 1 + replaceLines.Length) ? "→" : " ";
+            contextLines.Add($"{i + 1,4}: {marker} {lines[i]}");
+        }
+
+        return $"✓ Успешно заменено в {fileName} (строка {lineNumber})\n" +
+               $"Заменено {replaceLines.Length} строк. Контекст:\n" +
+               string.Join("\n", contextLines);
     }
 
     private static string NormalizeWhitespace(string text)
@@ -432,7 +617,7 @@ public class FileToolOptions
 public record FileArgs
 {
     [JsonPropertyName("action")]
-    [ToolParameter(Type = "string", Description = "read | list | write | append | delete | edit | create_dir | delete_dir | move | copy", Required = true, Enum = new[] { "read", "list", "write", "append", "delete", "edit", "create_dir", "delete_dir", "move", "copy" })]
+    [ToolParameter(Type = "string", Description = "read | list | glob | read_tree | write | append | delete | edit | create_dir | delete_dir | move | copy", Required = true, Enum = new[] { "read", "list", "glob", "read_tree", "write", "append", "delete", "edit", "create_dir", "delete_dir", "move", "copy" })]
     public string? Action { get; init; }
 
     [JsonPropertyName("path")]
@@ -458,4 +643,12 @@ public record FileArgs
     [JsonPropertyName("recursive")]
     [ToolParameter(Type = "boolean", Description = "Для delete_dir: удалить с содержимым")]
     public bool? Recursive { get; init; }
+
+    [JsonPropertyName("pattern")]
+    [ToolParameter(Type = "string", Description = "Для glob: маска файлов (напр. **/*.cs, *.json, Agents/**/*.cs)")]
+    public string? Pattern { get; init; }
+
+    [JsonPropertyName("max_depth")]
+    [ToolParameter(Type = "number", Description = "Для read_tree: максимальная глубина (по умолчанию 3, макс 10)")]
+    public int? MaxDepth { get; init; }
 }

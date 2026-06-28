@@ -15,4 +15,6 @@ public class OpenAiOptions
     public string? LmStudioApiKey { get; set; }
     public string? OllamaBaseUrl { get; set; } = "http://localhost:11434/v1";
     public string? OllamaApiKey { get; set; }
+    public int RetryMaxAttempts { get; set; } = 3;
+    public int RetryBaseDelayMs { get; set; } = 2000;
 }

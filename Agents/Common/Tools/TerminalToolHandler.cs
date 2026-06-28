@@ -62,17 +62,17 @@ public class TerminalToolHandler : IToolHandler
         return null;
     }
 
-    public Task<string?> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
+    public Task<ToolResult> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
     {
         try
         {
             if (!ToolArgumentValidator.TryValidateJson<TerminalArgs>(argumentsJson, out var args, out var err) || args == null)
-                return Task.FromResult<string?>(ToolResultFormatter.Error(
+                return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
                     "Ошибка terminal", "неверные arguments для terminal. " + (err ?? ""),
-                    null));
+                    null)));
 
             if (string.IsNullOrWhiteSpace(args.Command))
-                return Task.FromResult<string?>(ToolResultFormatter.Error("Ошибка terminal", "укажите command", null));
+                return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error("Ошибка terminal", "укажите command", null)));
 
             var defaultTimeout = _options.DefaultTimeoutSeconds > 0 ? _options.DefaultTimeoutSeconds : 60;
             var minTimeout = _options.MinTimeoutSeconds > 0 ? _options.MinTimeoutSeconds : 1;
@@ -82,17 +82,18 @@ public class TerminalToolHandler : IToolHandler
                 : defaultTimeout * 1000;
 
             var command = args.Command.Trim();
-            _logger.LogInformation("[Terminal] {Command}", command);
+            var workingDir = string.IsNullOrWhiteSpace(args.WorkingDirectory) ? null : args.WorkingDirectory.Trim();
+            _logger.LogInformation("[Terminal] {Command} (cwd: {Cwd})", command, workingDir ?? ".");
 
             var shellHint = BuildShellHint(command);
             if (shellHint != null)
                 _logger.LogInformation("[Terminal] {Hint}", shellHint);
 
-            return RunCommandAsync(command, timeoutMs, shellHint, cancellationToken);
+            return RunCommandAsync(command, timeoutMs, shellHint, workingDir, cancellationToken);
         }
         catch (Exception ex)
         {
-            return Task.FromResult<string?>(ToolResultFormatter.Error("Ошибка terminal", ex.Message, null));
+            return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error("Ошибка terminal", ex.Message, null)));
         }
     }
 
@@ -126,12 +127,14 @@ public class TerminalToolHandler : IToolHandler
         return sb.ToString();
     }
 
+
+
     private static string EscapePowerShellCommand(string command)
     {
         return command.Replace("\"", "\\\"");
     }
 
-    private async Task<string?> RunCommandAsync(string command, int timeoutMs, string? shellHint, CancellationToken ct)
+    private async Task<ToolResult> RunCommandAsync(string command, int timeoutMs, string? shellHint, string? workingDirectory, CancellationToken ct)
     {
         var psi = new ProcessStartInfo
         {
@@ -140,7 +143,8 @@ public class TerminalToolHandler : IToolHandler
             UseShellExecute = false,
             CreateNoWindow = true,
             StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
+            StandardErrorEncoding = Encoding.UTF8,
+            WorkingDirectory = workingDirectory ?? Directory.GetCurrentDirectory()
         };
 
         if (IsWindows)
@@ -182,12 +186,12 @@ public class TerminalToolHandler : IToolHandler
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
         {
             try { process.Kill(entireProcessTree: true); } catch (Exception killEx) { _logger.LogWarning(killEx, "Failed to kill timed-out process"); }
-            return FormatError($"превышено время ожидания ({timeoutMs / 1000} сек). Команда прервана.\nВывод до прерывания:\n{output}", shellHint);
+            return ToolResult.FromString(FormatError($"превышено время ожидания ({timeoutMs / 1000} сек). Команда прервана.\nВывод до прерывания:\n{output}", shellHint));
         }
         catch (OperationCanceledException)
         {
             try { process.Kill(entireProcessTree: true); } catch (Exception killEx) { _logger.LogWarning(killEx, "Failed to kill cancelled process"); }
-            return FormatError("команда отменена", shellHint);
+            return ToolResult.FromString(FormatError("команда отменена", shellHint));
         }
 
         var outStr = output.ToString().TrimEnd();
@@ -220,7 +224,7 @@ public class TerminalToolHandler : IToolHandler
             var tail = resultStr[^maxOutputLen..];
             resultStr = $"[... вывод обрезан, показаны последние {maxOutputLen} символов ...]\n" + tail;
         }
-        return resultStr;
+        return ToolResult.Structured(new { Command = command, Stdout = outStr, Stderr = errStr, ExitCode = process.ExitCode }, resultStr);
     }
 }
 
@@ -243,4 +247,8 @@ public record TerminalArgs
     [JsonPropertyName("timeout_seconds")]
     [ToolParameter(Type = "number", Description = "Таймаут в сек (по умолчанию 60, макс 300)")]
     public int? TimeoutSeconds { get; init; }
+
+    [JsonPropertyName("working_directory")]
+    [ToolParameter(Type = "string", Description = "Рабочая директория для команды (по умолчанию — корень проекта)")]
+    public string? WorkingDirectory { get; init; }
 }

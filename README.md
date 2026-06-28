@@ -241,7 +241,7 @@ dotnet publish Click.csproj -c Release -o ./out
 ```json
 {
   "Agent": {
-    "MaxIterations": 15,
+    "MaxIterations": 2000,
     "LoopDetectionWindow": 2,
     "MaxToolResultCharsKeep": 2500,
     "MaxToolResultCharsSuccess": 400,

@@ -70,3 +70,11 @@ id_ed25519.pub
 ## Logs
 logs/
 *.log
+
+## Windows artifacts
+nul
+aux
+prn
+con
+lpt1
+com1

@@ -109,67 +109,106 @@ public class OpenAiChatService : IChatService
         string? model = null,
         CancellationToken cancellationToken = default)
     {
-        const int maxAttempts = 3;
-        const int baseDelayMs = 2000;
+        var maxAttempts = Math.Max(1, _options.RetryMaxAttempts);
         Exception? lastEx = null;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+
             try
             {
-                var (baseUrl, apiKey, effectiveModel) = ResolveEndpointAndModel(model);
-                var request = new ChatRequest(
-                    Model: effectiveModel,
-                    Messages: messages,
-                    MaxTokens: _options.MaxTokens,
-                    Stream: true,
-                    Tools: tools?.Count > 0 ? tools : null,
-                    ParallelToolCalls: tools?.Count > 0 && _options.UseParallelToolCalls ? true : null,
-                    ToolChoice: tools?.Count > 0 && _options.UseRequiredToolChoice ? "required" as object : null
-                );
-
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                cts.CancelAfter(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds));
-
-                var url = baseUrl.TrimEnd('/') + "/chat/completions";
-                using var req = new HttpRequestMessage(HttpMethod.Post, url);
-                SetAuthHeaders(req, apiKey);
-                if (_options.AdditionalHeaders != null)
-                {
-                    foreach (var h in _options.AdditionalHeaders)
-                        req.Headers.TryAddWithoutValidation(h.Key, h.Value);
-                }
-                req.Content = JsonContent.Create(request, options: JsonOptions);
-
-                using var response = await _httpClient.SendAsync(req, cts.Token);
-
-                if (!response.IsSuccessStatusCode)
-                {
-                    var body = await response.Content.ReadAsStringAsync(cts.Token);
-                    throw new InvalidOperationException($"API error {(int)response.StatusCode}: {body}");
-                }
-
-                return await ParseStreamedResponseAsync(response, cts.Token);
+                return await SendSingleRequestAsync(messages, tools, model, cancellationToken);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < maxAttempts)
             {
                 lastEx = new TimeoutException("Request timed out");
-                await Task.Delay(baseDelayMs * attempt, cancellationToken);
+                await Task.Delay(ComputeDelay(attempt, _options.RetryBaseDelayMs, isTimeout: true), cancellationToken);
             }
             catch (HttpRequestException ex) when (attempt < maxAttempts)
             {
                 lastEx = ex;
-                var backoffDelay = baseDelayMs * (int)Math.Pow(2, attempt - 1);
-                await Task.Delay(backoffDelay, cancellationToken);
+                await Task.Delay(ComputeDelay(attempt, _options.RetryBaseDelayMs, isTimeout: false), cancellationToken);
+            }
+            catch (InvalidOperationException ex) when (attempt < maxAttempts)
+            {
+                lastEx = ex;
+                var delay = TryExtractRetryAfterDelay(ex, attempt);
+                await Task.Delay(delay, cancellationToken);
             }
             catch (Exception ex) when (attempt < maxAttempts)
             {
                 lastEx = ex;
-                await Task.Delay(baseDelayMs, cancellationToken);
+                await Task.Delay(ComputeDelay(attempt, _options.RetryBaseDelayMs, isTimeout: false), cancellationToken);
             }
         }
 
         throw lastEx ?? new InvalidOperationException("Failed to get response from API");
+    }
+
+    private async Task<AgentChatResponse> SendSingleRequestAsync(
+        IReadOnlyList<ApiMessage> messages,
+        IReadOnlyList<ApiTool>? tools,
+        string? model,
+        CancellationToken cancellationToken)
+    {
+        var (baseUrl, apiKey, effectiveModel) = ResolveEndpointAndModel(model);
+        var request = new ChatRequest(
+            Model: effectiveModel,
+            Messages: messages,
+            MaxTokens: _options.MaxTokens,
+            Stream: true,
+            Tools: tools?.Count > 0 ? tools : null,
+            ParallelToolCalls: tools?.Count > 0 && _options.UseParallelToolCalls ? true : null,
+            ToolChoice: tools?.Count > 0 && _options.UseRequiredToolChoice ? "required" as object : null
+        );
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(TimeSpan.FromSeconds(_options.RequestTimeoutSeconds));
+
+        var url = baseUrl.TrimEnd('/') + "/chat/completions";
+        using var req = new HttpRequestMessage(HttpMethod.Post, url);
+        SetAuthHeaders(req, apiKey);
+        if (_options.AdditionalHeaders != null)
+        {
+            foreach (var h in _options.AdditionalHeaders)
+                req.Headers.TryAddWithoutValidation(h.Key, h.Value);
+        }
+        req.Content = JsonContent.Create(request, options: JsonOptions);
+
+        using var response = await _httpClient.SendAsync(req, cts.Token);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var statusCode = (int)response.StatusCode;
+            var body = await response.Content.ReadAsStringAsync(cts.Token);
+            var retryAfter = response.Headers.RetryAfter?.Delta;
+            throw new InvalidOperationException($"API error {statusCode}: {body}|{retryAfter?.TotalSeconds ?? 0}");
+        }
+
+        return await ParseStreamedResponseAsync(response, cts.Token);
+    }
+
+    private static TimeSpan ComputeDelay(int attempt, int baseDelayMs, bool isTimeout)
+    {
+        var jitter = 0.5 + Random.Shared.NextDouble() * 0.5;
+        var delayMs = isTimeout
+            ? baseDelayMs * attempt
+            : baseDelayMs * (int)Math.Pow(2, attempt - 1);
+        return TimeSpan.FromMilliseconds(delayMs * jitter);
+    }
+
+    private static TimeSpan TryExtractRetryAfterDelay(InvalidOperationException ex, int attempt)
+    {
+        var message = ex.Message;
+        var pipeIdx = message.LastIndexOf('|');
+        if (pipeIdx > 0 && double.TryParse(message[(pipeIdx + 1)..], out var seconds) && seconds > 0)
+        {
+            var cap = TimeSpan.FromSeconds(30);
+            var delay = TimeSpan.FromSeconds(Math.Min(seconds, cap.TotalSeconds));
+            return delay + TimeSpan.FromMilliseconds(Random.Shared.Next(0, 1000));
+        }
+        return ComputeDelay(attempt, 2000, isTimeout: false);
     }
 
     private static void SetAuthHeaders(HttpRequestMessage req, string? apiKey)

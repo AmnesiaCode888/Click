@@ -2,5 +2,5 @@ namespace AgentSharp;
 
 public interface IToolHandler
 {
-    Task<string?> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default);
+    Task<ToolResult> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default);
 }

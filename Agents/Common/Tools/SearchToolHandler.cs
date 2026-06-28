@@ -25,18 +25,18 @@ public class SearchToolHandler : IToolHandler
         _options = options;
     }
 
-    public async Task<string?> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
+    public async Task<ToolResult> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
     {
         try
         {
             if (!ToolArgumentValidator.TryValidateJson<SearchArgs>(argumentsJson, out var args, out var err) || args == null)
-                return ToolResultFormatter.Error("Ошибка search", "неверные arguments для search", err);
+                return ToolResult.FromString(ToolResultFormatter.Error("Ошибка search", "неверные arguments для search", err));
 
             if (string.IsNullOrWhiteSpace(args.Query))
-                return ToolResultFormatter.Error("Ошибка search", "укажите query", "передай поисковый запрос в поле query");
+                return ToolResult.FromString(ToolResultFormatter.Error("Ошибка search", "укажите query", "передай поисковый запрос в поле query"));
 
             if (string.IsNullOrWhiteSpace(_apiKey))
-                return ToolResultFormatter.Error("Ошибка search", "API ключ Serper не настроен", "добавь Serper:ApiKey в appsettings.json или не используй поиск");
+                return ToolResult.FromString(ToolResultFormatter.Error("Ошибка search", "API ключ Serper не настроен", "добавь Serper:ApiKey в appsettings.json или не используй поиск"));
 
             var maxResults = Math.Clamp(
                 args.MaxResults ?? _options.DefaultMaxResults,
@@ -87,22 +87,23 @@ public class SearchToolHandler : IToolHandler
             }
 
             if (lines.Count == 0)
-                return ToolResultFormatter.Error(
+                return ToolResult.FromString(ToolResultFormatter.Error(
                     "Ошибка search", "результаты не найдены",
-                    "попробуй переформулировать запрос или используй web_read с известным URL");
+                    "попробуй переформулировать запрос или используй web_read с известным URL"));
 
-            return string.Join("\n", lines);
+            var formatted = string.Join("\n", lines);
+            return ToolResult.Structured(new { Query = args.Query, Results = lines }, formatted);
         }
         catch (HttpRequestException ex)
         {
             var status = ex.StatusCode.HasValue ? $"{(int)ex.StatusCode.Value} " : "";
-            return ToolResultFormatter.Error(
+            return ToolResult.FromString(ToolResultFormatter.Error(
                 "Ошибка search", $"ошибка сети ({status}{ex.Message})",
-                "проверь подключение и API ключ Serper");
+                "проверь подключение и API ключ Serper"));
         }
         catch (Exception ex)
         {
-            return ToolResultFormatter.Error("Ошибка search", ex.Message, "попробуй упростить запрос");
+            return ToolResult.FromString(ToolResultFormatter.Error("Ошибка search", ex.Message, "попробуй упростить запрос"));
         }
     }
 }

@@ -20,6 +20,7 @@ public static class PromptLoader
         return prompt
             .Replace("{{WorkspacePath}}", context.WorkspacePath)
             .Replace("{{CurrentDateTime}}", context.Metadata.CurrentDateTime)
-            .Replace("{{OperatingSystem}}", context.Metadata.OperatingSystem);
+            .Replace("{{OperatingSystem}}", context.Metadata.OperatingSystem)
+            .Replace("{{WorkspaceDescription}}", context.Metadata.WorkspaceDescription ?? "(описание проекта недоступно — запустите /clear для обновления)");
     }
 }
