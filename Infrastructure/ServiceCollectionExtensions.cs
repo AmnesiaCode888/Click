@@ -1,6 +1,7 @@
 using System.Reflection;
 using AgentSharp;
 using Click.Agents.Common.Tools;
+using Click.Services.Vector;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -76,6 +77,51 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<SubAgentToolHandler>();
 
+<<<<<<< Updated upstream
+=======
+        // --- Embedding / Vector search (conditional on config) ---
+        var embedOptions = configuration.GetSection(EmbeddingOptions.SectionName).Get<EmbeddingOptions>() ?? new EmbeddingOptions();
+        services.AddSingleton(embedOptions);
+
+        if (embedOptions.IsConfigured)
+        {
+            services.AddHttpClient<OpenAiEmbeddingService>().ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(60));
+            services.AddSingleton<IEmbeddingService>(sp =>
+            {
+                var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(OpenAiEmbeddingService));
+                return new OpenAiEmbeddingService(http, embedOptions);
+            });
+        }
+        else
+        {
+            services.AddSingleton<IEmbeddingService>(new NoOpEmbeddingService());
+        }
+
+        services.AddSingleton<ChunkerFactory>();
+        services.AddSingleton(sp =>
+        {
+            var workspaceOptions = sp.GetRequiredService<ClickWorkspaceOptions>();
+            var store = new SqliteVectorStore(workspaceOptions.GetResolvedBasePath());
+            return store;
+        });
+        services.AddSingleton<IVectorStore>(sp => sp.GetRequiredService<SqliteVectorStore>());
+        services.AddSingleton<VectorIndexService>(sp =>
+        {
+            var workspaceOptions = sp.GetRequiredService<ClickWorkspaceOptions>();
+            var store = sp.GetRequiredService<IVectorStore>();
+            var embedding = sp.GetRequiredService<IEmbeddingService>();
+            var chunkerFactory = sp.GetRequiredService<ChunkerFactory>();
+            var logger = sp.GetRequiredService<ILogger<VectorIndexService>>();
+            return new VectorIndexService(workspaceOptions.GetResolvedBasePath(), store, embedding, chunkerFactory, logger);
+        });
+        services.AddSingleton<SemanticSearchToolHandler>(sp =>
+        {
+            var indexService = sp.GetRequiredService<VectorIndexService>();
+            var logger = sp.GetRequiredService<ILogger<SemanticSearchToolHandler>>();
+            return new SemanticSearchToolHandler(indexService, logger);
+        });
+
+>>>>>>> Stashed changes
         var agentTypes = Assembly.GetExecutingAssembly()
             .GetTypes()
             .Where(t => typeof(IAgent).IsAssignableFrom(t)

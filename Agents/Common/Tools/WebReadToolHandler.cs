@@ -14,6 +14,7 @@ public class WebReadToolHandler : IToolHandler
     private readonly ILogger<WebReadToolHandler> _logger;
     private readonly WebReadToolOptions _options;
     private readonly ConcurrentDictionary<string, string> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxCacheEntries = 100;
     private static readonly Regex UrlRegex = new(@"https?://[^\s\)\)""']+", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     public WebReadToolHandler(
@@ -84,6 +85,7 @@ public class WebReadToolHandler : IToolHandler
 
             // Cache the result
             _cache[url] = text;
+            TrimCache();
 
             var formatted = $"📄 {url}\n\n{text}";
             return ToolResult.Structured(new { Url = url, Content = text }, formatted);
@@ -240,6 +242,13 @@ public class WebReadToolHandler : IToolHandler
                     ConvertNode(child, sb, baseUrl);
                 break;
         }
+    }
+
+    private void TrimCache()
+    {
+        if (_cache.Count <= MaxCacheEntries) return;
+        foreach (var key in _cache.Keys.Take(_cache.Count - MaxCacheEntries).ToList())
+            _cache.TryRemove(key, out _);
     }
 
     private static string? ExtractValidUrl(string input)

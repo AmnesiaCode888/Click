@@ -46,6 +46,9 @@ coverage*.info
 .DS_Store
 Thumbs.db
 
+## Click vector index (generated data)
+.click/
+
 ## Secrets and local config
 appsettings.Development.json
 appsettings.Local.json

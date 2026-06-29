@@ -37,6 +37,12 @@ public class FileToolHandler : IToolHandler
             var args = System.Text.Json.JsonSerializer.Deserialize<FileArgs>(argumentsJson)
                 ?? throw new ArgumentException("Не удалось десериализовать аргументы");
 
+<<<<<<< Updated upstream
+=======
+            if (string.IsNullOrEmpty(args.Action) && !_allowWrite)
+                args = args with { Action = "read" };
+
+>>>>>>> Stashed changes
             if (!_allowWrite && !ReadOnlyActions.Contains(args.Action ?? ""))
                 return Task.FromResult(ToolResult.FromString("Ошибка: этот агент работает только на чтение. Запрещённые действия: write, append, delete, edit, create_dir, delete_dir, move, copy."));
 
@@ -175,10 +181,11 @@ public class FileToolHandler : IToolHandler
         if (replace.EndsWith('\n') || replace.EndsWith('\r'))
             replace = replace.TrimEnd('\n', '\r');
 
-        if (!content.Contains(search))
+        var searchIdxInFile = content.IndexOf(search, StringComparison.Ordinal);
+        if (searchIdxInFile < 0)
             return ToolResult.FromString("Ошибка: SEARCH-блок не найден в файле");
 
-        var newContent = content.Replace(search, replace, StringComparison.Ordinal);
+        var newContent = content[..searchIdxInFile] + replace + content[(searchIdxInFile + search.Length)..];
         File.WriteAllText(path, newContent);
         return ToolResult.FromString($"Изменено: {args.Path}");
     }

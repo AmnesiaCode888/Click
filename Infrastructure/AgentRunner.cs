@@ -259,7 +259,8 @@ public class AgentRunner : IAgentRunner
                 }
                 else
                 {
-                    messages[i] = messages[i] with { Content = c[..maxSuccessMax] + $"\n[... {c.Length - maxSuccessMax} chars truncated by context limit ...]" };
+                    var truncated = c.Length > maxSuccessMax ? c[..maxSuccessMax] : c;
+                    messages[i] = messages[i] with { Content = truncated + $"\n[... {c.Length - maxSuccessMax} chars truncated by context limit ...]" };
                 }
             }
         }

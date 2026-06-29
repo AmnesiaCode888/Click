@@ -172,14 +172,15 @@ public class OpenAiChatService : IChatService
         CancellationToken cancellationToken)
     {
         var (baseUrl, apiKey, effectiveModel) = ResolveEndpointAndModel(model);
+        var isLocalEndpoint = baseUrl.Contains("localhost") || baseUrl.Contains("127.0.0.1");
         var request = new ChatRequest(
             Model: effectiveModel,
             Messages: messages,
             MaxTokens: _options.MaxTokens,
             Stream: true,
             Tools: tools?.Count > 0 ? tools : null,
-            ParallelToolCalls: tools?.Count > 0 && _options.UseParallelToolCalls ? true : null,
-            ToolChoice: tools?.Count > 0 && _options.UseRequiredToolChoice ? "required" as object : null
+            ParallelToolCalls: tools?.Count > 0 && _options.UseParallelToolCalls && !isLocalEndpoint ? true : null,
+            ToolChoice: tools?.Count > 0 && _options.UseRequiredToolChoice && !isLocalEndpoint ? "required" as object : null
         );
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -358,14 +359,13 @@ public class OpenAiChatService : IChatService
         }
 
         var toolCalls = new List<ToolCallRequest>();
-        int generatedIdIndex = 0;
         foreach (var (_, (id, name, args)) in toolCallMap.OrderBy(x => x.Key))
         {
             var arguments = args.ToString();
             if (!IsValidJsonObject(arguments))
                 continue;
 
-            var finalId = string.IsNullOrEmpty(id) ? $"call_{generatedIdIndex++}" : id;
+            var finalId = string.IsNullOrEmpty(id) ? $"call_{Guid.NewGuid():N}" : id;
             toolCalls.Add(new ToolCallRequest(finalId, name, arguments));
         }
 
