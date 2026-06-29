@@ -296,7 +296,7 @@ public class AgentRunner : IAgentRunner
         return string.IsNullOrWhiteSpace(cleaned) ? content : cleaned;
     }
 
-    private static string FormatToolLogEntry(string name, string argsJson, string result)
+    private string FormatToolLogEntry(string name, string argsJson, string result)
     {
         var args = TryParseArgs(argsJson);
         string arg;
@@ -343,15 +343,27 @@ public class AgentRunner : IAgentRunner
         return $"{argPart} — {oneLine}";
     }
 
-    private static Dictionary<string, string> TryParseArgs(string json)
+    private Dictionary<string, string> TryParseArgs(string json)
     {
         try
         {
             var d = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
             if (d == null) return new Dictionary<string, string>();
-            return d.ToDictionary(kv => kv.Key, kv => kv.Value.GetString() ?? "");
+            return d.ToDictionary(kv => kv.Key, kv => kv.Value.ValueKind switch
+            {
+                JsonValueKind.String => kv.Value.GetString() ?? "",
+                JsonValueKind.Number => kv.Value.GetRawText(),
+                JsonValueKind.True => "true",
+                JsonValueKind.False => "false",
+                JsonValueKind.Null => "",
+                _ => kv.Value.GetRawText()
+            });
         }
-        catch { return new Dictionary<string, string>(); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to parse tool arguments JSON: {Json}", json);
+            return new Dictionary<string, string>();
+        }
     }
 
     private static async Task<string> ExecuteToolAsync(IAgent agent, string name, string argumentsJson, CancellationToken ct)

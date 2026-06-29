@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json.Serialization;
 using AgentSharp;
@@ -57,11 +57,10 @@ public class TerminalToolHandler : IToolHandler
 
         try
         {
-            var (isWindows, shell, shellArg) = DetectShell();
+            var (isWindows, shell, shellArgs) = DetectShell();
             var psi = new ProcessStartInfo
             {
                 FileName = shell,
-                Arguments = isWindows ? $"{shellArg} \"{command}\"" : $"{shellArg} \"{command}\"",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
@@ -70,6 +69,10 @@ public class TerminalToolHandler : IToolHandler
                 StandardErrorEncoding = Encoding.UTF8,
                 WorkingDirectory = workingDirectory
             };
+
+            foreach (var arg in shellArgs)
+                psi.ArgumentList.Add(arg);
+            psi.ArgumentList.Add(command);
 
             using var process = new Process { StartInfo = psi };
             var output = new StringBuilder();
@@ -139,14 +142,14 @@ public class TerminalToolHandler : IToolHandler
         }
     }
 
-    private static (bool isWindows, string shell, string shellArg) DetectShell()
+    private static (bool isWindows, string shell, string[] shellArgs) DetectShell()
     {
         if (OperatingSystem.IsWindows())
         {
             // Prefer PowerShell on Windows
-            return (true, "powershell", "-NoProfile -Command");
+            return (true, "powershell", ["-NoProfile", "-Command"]);
         }
-        return (false, "/bin/sh", "-c");
+        return (false, "/bin/sh", ["-c"]);
     }
 
     private static string? BuildShellHint(string command)

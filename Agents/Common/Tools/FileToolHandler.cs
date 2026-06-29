@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 using AgentSharp;
 using Microsoft.Extensions.Logging;
 
@@ -6,31 +6,41 @@ namespace Click.Agents.Common.Tools;
 
 public class FileToolHandler : IToolHandler
 {
+    private static readonly HashSet<string> ReadOnlyActions =
+        new(StringComparer.OrdinalIgnoreCase) { "read", "list", "glob", "read_tree" };
+
     private readonly string _workspacePath;
     private readonly FileToolOptions _options;
     private readonly ILogger<FileToolHandler> _logger;
+    private readonly bool _allowWrite;
 
-    public FileToolHandler(string workspacePath, FileToolOptions options, ILogger<FileToolHandler> logger)
+    public FileToolHandler(string workspacePath, FileToolOptions options, ILogger<FileToolHandler> logger, bool allowWrite = true)
     {
         _workspacePath = Path.GetFullPath(workspacePath);
         _options = options;
         _logger = logger;
+        _allowWrite = allowWrite;
     }
 
     public string Name => "file";
 
-    public string Description => "Работа с файлами проекта (read/write/append/delete/edit/create_dir/move/copy)";
+    public string Description => _allowWrite
+        ? "Работа с файлами проекта (read/write/append/delete/edit/create_dir/move/copy)"
+        : "Только чтение файлов проекта (read/list/glob/read_tree)";
 
     public Type ArgsType => typeof(FileArgs);
 
-    public async Task<ToolResult> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
+    public Task<ToolResult> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
     {
-        var args = System.Text.Json.JsonSerializer.Deserialize<FileArgs>(argumentsJson)
-            ?? throw new ArgumentException("Не удалось десериализовать аргументы");
-
         try
         {
-            return args.Action switch
+            var args = System.Text.Json.JsonSerializer.Deserialize<FileArgs>(argumentsJson)
+                ?? throw new ArgumentException("Не удалось десериализовать аргументы");
+
+            if (!_allowWrite && !ReadOnlyActions.Contains(args.Action ?? ""))
+                return Task.FromResult(ToolResult.FromString("Ошибка: этот агент работает только на чтение. Запрещённые действия: write, append, delete, edit, create_dir, delete_dir, move, copy."));
+
+            return Task.FromResult(args.Action switch
             {
                 "read" => HandleRead(args),
                 "write" => HandleWrite(args),
@@ -45,12 +55,12 @@ public class FileToolHandler : IToolHandler
                 "glob" => HandleGlob(args),
                 "read_tree" => HandleReadTree(args),
                 _ => ToolResult.FromString($"Неизвестное действие: {args.Action}")
-            };
+            });
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "File tool error");
-            return ToolResult.FromString($"Ошибка: {ex.Message}");
+            return Task.FromResult(ToolResult.FromString($"Ошибка: {ex.Message}"));
         }
     }
 
@@ -83,9 +93,22 @@ public class FileToolHandler : IToolHandler
         if (!File.Exists(path))
             return ToolResult.FromString($"Файл '{args.Path}' не найден");
 
-        var content = File.ReadAllText(path);
+        var lines = File.ReadAllLines(path);
+        var offset = Math.Max(1, args.Offset ?? 1);
+        var limit = args.Limit ?? _options.DefaultReadLimit;
+
+        if (offset > lines.Length)
+            return ToolResult.FromString($"Файл '{args.Path}' содержит {lines.Length} строк. Указанный offset {offset} выходит за пределы.");
+
+        var startIndex = offset - 1;
+        var selectedLines = lines.Skip(startIndex).Take(limit).ToArray();
+        var content = string.Join("\n", selectedLines);
+
         if (content.Length > _options.MaxReadChars)
             content = content[.._options.MaxReadChars] + "\n... (обрезано)";
+
+        if (lines.Length > offset + limit - 1)
+            content += $"\n\n... осталось {lines.Length - (offset + limit - 1)} строк (всего {lines.Length}, показано {limit} начиная со строки {offset})";
 
         return ToolResult.FromString(content);
     }
@@ -224,12 +247,20 @@ public class FileToolHandler : IToolHandler
             return ToolResult.FromString($"Директория '{args.Path}' не найдена");
 
         var entries = Directory.GetFileSystemEntries(path);
-        var result = entries.Select(e =>
+        var result = new List<string>();
+        foreach (var e in entries)
         {
-            var attr = File.GetAttributes(e);
-            var isDir = attr.HasFlag(FileAttributes.Directory);
-            return isDir ? Path.GetFileName(e) + "/" : Path.GetFileName(e);
-        });
+            try
+            {
+                var attr = File.GetAttributes(e);
+                var isDir = attr.HasFlag(FileAttributes.Directory);
+                result.Add(isDir ? Path.GetFileName(e) + "/" : Path.GetFileName(e));
+            }
+            catch (IOException)
+            {
+                result.Add(Path.GetFileName(e) + " <-- ошибка доступа");
+            }
+        }
 
         return ToolResult.FromString(string.Join("\n", result));
     }
@@ -300,29 +331,55 @@ public class FileToolHandler : IToolHandler
         try
         {
             var entries = Directory.GetFileSystemEntries(dir)
-                .OrderBy(e => !File.GetAttributes(e).HasFlag(FileAttributes.Directory))
-                .ThenBy(e => Path.GetFileName(e));
+                .OrderBy(e => IsFileSafe(e))
+                .ThenBy(e =>
+                {
+                    try { return Path.GetFileName(e); }
+                    catch { return ""; }
+                });
 
             foreach (var entry in entries)
             {
-                var name = Path.GetFileName(entry);
-                var attr = File.GetAttributes(entry);
-                var isDir = attr.HasFlag(FileAttributes.Directory);
+                try
+                {
+                    var isFile = IsFileSafe(entry);
+                    var name = Path.GetFileName(entry);
 
-                if (isDir)
-                {
-                    result.Add($"{indent}{name}/");
-                    ReadTreeRecursive(entry, indent + "  ", depth + 1, maxDepth, result);
+                    if (isFile)
+                    {
+                        result.Add($"{indent}{name}");
+                    }
+                    else
+                    {
+                        result.Add($"{indent}{name}/");
+                        ReadTreeRecursive(entry, indent + "  ", depth + 1, maxDepth, result);
+                    }
                 }
-                else
+                catch (IOException)
                 {
-                    result.Add($"{indent}{name}");
+                    result.Add($"{indent}{Path.GetFileName(entry)} <-- ошибка доступа");
                 }
             }
         }
         catch (UnauthorizedAccessException)
         {
             result.Add($"{indent}[access denied]");
+        }
+        catch (DirectoryNotFoundException)
+        {
+            result.Add($"{indent}[directory not found]");
+        }
+    }
+
+    private static bool IsFileSafe(string path)
+    {
+        try
+        {
+            return !File.GetAttributes(path).HasFlag(FileAttributes.Directory);
+        }
+        catch
+        {
+            return true;
         }
     }
 

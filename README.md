@@ -70,7 +70,7 @@
 | Папка / Folder | Назначение / Purpose |
 |---|---|
 | `AgentSharp/` | Базовый фреймворк: `IAgent`, `AgentBase`, `IAgentRunner`, `IChatService`, модели сообщений и инструментов, `ToolFactory`. / Base framework: agent abstractions, message/tool models, `ToolFactory`. |
-| `Agents/` | Конкретные агенты и их инструменты. Сейчас: `CodeAssistant`. / Concrete agents and their tools. Currently: `CodeAssistant`. |
+| `Agents/` | Конкретные агенты и их инструменты. Сейчас: `CodeAssistant`, `QuestionAgent`, `SecurityReviewer`. / Concrete agents and their tools. Currently: `CodeAssistant`, `QuestionAgent`, `SecurityReviewer`. |
 | `Agents/Common/Tools/` | Общие обработчики инструментов (`file`, `terminal`, `search`, `web_read`). / Common tool handlers. |
 | `Infrastructure/` | DI-регистрация, реализация `AgentRunner`, реестр агентов, загрузчик промптов. / DI registration, `AgentRunner`, agent registry, prompt loader. |
 | `Services/` | Конфигурационные модели и реализация `OpenAiChatService`. / Configuration models and `OpenAiChatService`. |
@@ -81,14 +81,50 @@
 - Имя: `Click`
 - Системный промпт загружается из `Agents/CodeAssistant/Prompts/System.md` и параметризуется путём workspace, датой/временем и ОС.
 
+### Агент `QuestionAgent`
+
+- Идентификатор: `question`
+- Имя: `QuestionAgent`
+- Системный промпт загружается из `Agents/Question/Prompts/System.md`.
+- Работает только на чтение: использует инструмент `file` в read-only режиме, а также `web_read` и `search`.
+- Предназначен для консультаций по коду: отвечает на вопросы об архитектуре, зависимостях, устройстве проекта.
+- Может быть вызван из CodeAssistant через инструмент `ask_agent`.
+
+### Агент `SecurityReviewer`
+
+- Идентификатор: `security`
+- Имя: `SecurityReviewer`
+- Системный промпт загружается из `Agents/SecurityReview/Prompts/System.md`.
+- Работает только на чтение: использует инструмент `file` в read-only режиме, а также `web_read` и `search`.
+- Вызывается из консоли командами `/security-review` или `/s-r`.
+
+### Режимы работы / Agent Modes
+
+Click поддерживает переключение между режимами через команду `/mode` или `Ctrl+M`:
+
+| Режим / Mode | Агент / Agent | Доступ / Access |
+|---|---|---|
+| `[CODE]` | `CodeAssistant` | Полный доступ: чтение, запись, терминал |
+| `[QUESTION]` | `QuestionAgent` | Только чтение: консультации по коду |
+| `[SECURITY]` | `SecurityReviewer` | Только чтение: поиск уязвимостей |
+
+Текущий режим отображается цветным тегом в строке ввода: `[CODE] >>>`, `[QUESTION] >>>`, `[SECURITY] >>>`.
+
+Команды переключения:
+- `/mode code` или `/m c` — режим CODE
+- `/mode question` или `/m q` — режим QUESTION
+- `/mode security` или `/m s` — режим SECURITY
+- `/mode` — показать текущий режим
+
 ### Доступные инструменты / Available Tools
 
 | Инструмент / Tool | Обработчик / Handler | Описание / Description |
 |---|---|---|
-| `file` | `FileToolHandler` | Операции с файлами и директориями внутри workspace. / File and directory operations within the workspace. |
-| `terminal` | `TerminalToolHandler` | Выполнение shell-команд. / Shell command execution. |
+| `file` | `FileToolHandler` / `ReadOnlyFileToolHandler` | Операции с файлами и директориями внутри workspace. Для read-only агентов доступны только read/list/glob/read_tree. / File and directory operations within the workspace. Read-only agents get read/list/glob/read_tree only. |
+| `terminal` | `TerminalToolHandler` | Выполнение shell-команд. Только для CodeAssistant. / Shell command execution. CodeAssistant only. |
 | `web_read` | `WebReadToolHandler` | Загрузка и чтение веб-страниц. / Fetch and read web pages. |
 | `search` | `SearchToolHandler` | Поиск в Google через Serper. / Google search via Serper. |
+| `ask_agent` | `SubAgentToolHandler` | Вызов субагента (QuestionAgent) для консультаций по коду. Только для CodeAssistant. / Call sub-agent (QuestionAgent) for code consultations. CodeAssistant only. |
 
 ---
 
@@ -128,8 +164,12 @@ dotnet publish Click.csproj -c Release -o ./out
 
 ### Интерактивные команды / Interactive Commands
 
-- `/exit` — завершить сессию / exit the session.
+- `/exit`, `/quit`, `/q` — завершить сессию / exit the session.
 - `/clear` — очистить историю сообщений / clear message history.
+- `/mode [code|question|security]` или `/m [c|q|s]` — переключить режим работы / switch agent mode.
+- `/models` — показать текущую модель / show current model.
+- `/config` — показать конфигурацию / show configuration.
+- `/security-review` или `/s-r` — запустить security review всего workspace отдельным агентом `SecurityReviewer` (только чтение, без изменений файлов) / run a security review of the whole workspace via the dedicated `SecurityReviewer` agent (read-only, no file mutations).
 
 ---
 
@@ -308,7 +348,7 @@ dotnet run --project Click.csproj
 3. Задайте запрос агенту, например:
 
 ```text
-Создай консольное приложение на C#, которое выводит текущее время.
+Создай консольное приложение, которое выводит текущее время.
 ```
 
 4. Агент выполнит шаги:

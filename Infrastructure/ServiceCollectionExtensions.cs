@@ -33,9 +33,38 @@ public static class ServiceCollectionExtensions
             });
         });
 
-        services.AddSingleton<FileToolHandler>();
-        services.AddSingleton<TerminalToolHandler>();
-        services.AddSingleton<WebReadToolHandler>();
+        services.AddSingleton<FileToolHandler>(sp =>
+        {
+            var workspaceOptions = sp.GetRequiredService<ClickWorkspaceOptions>();
+            var options = sp.GetRequiredService<FileToolOptions>();
+            var logger = sp.GetRequiredService<ILogger<FileToolHandler>>();
+            return new FileToolHandler(workspaceOptions.GetResolvedBasePath(), options, logger);
+        });
+
+        services.AddSingleton<ReadOnlyFileToolHandler>(sp =>
+        {
+            var workspaceOptions = sp.GetRequiredService<ClickWorkspaceOptions>();
+            var options = sp.GetRequiredService<FileToolOptions>();
+            var logger = sp.GetRequiredService<ILogger<ReadOnlyFileToolHandler>>();
+            return new ReadOnlyFileToolHandler(workspaceOptions.GetResolvedBasePath(), options, logger);
+        });
+
+        services.AddSingleton<TerminalToolHandler>(sp =>
+        {
+            var workspaceOptions = sp.GetRequiredService<ClickWorkspaceOptions>();
+            var options = sp.GetRequiredService<TerminalToolOptions>();
+            var logger = sp.GetRequiredService<ILogger<TerminalToolHandler>>();
+            return new TerminalToolHandler(workspaceOptions.GetResolvedBasePath(), options, logger);
+        });
+
+        services.AddSingleton<WebReadToolHandler>(sp =>
+        {
+            var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient();
+            var logger = sp.GetRequiredService<ILogger<WebReadToolHandler>>();
+            var options = sp.GetRequiredService<WebReadToolOptions>();
+            return new WebReadToolHandler(http, logger, options);
+        });
+
         services.AddSingleton<SearchToolHandler>(sp =>
         {
             var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient();
@@ -44,6 +73,8 @@ public static class ServiceCollectionExtensions
             var options = sp.GetRequiredService<SearchToolOptions>();
             return new SearchToolHandler(http, serperOpt.ApiKey ?? "", logger, options);
         });
+
+        services.AddSingleton<SubAgentToolHandler>();
 
         var agentTypes = Assembly.GetExecutingAssembly()
             .GetTypes()

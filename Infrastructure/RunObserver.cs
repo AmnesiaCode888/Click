@@ -75,13 +75,12 @@ public sealed class RunObserver : IProgress<AgentRunnerProgress>
     /// <summary>
     /// Open a new phase: connector bar (except for the very first phase, so
     /// the timeline starts flush under "Запускаю агент…"), then header. The
-    /// connector bar is grey-tinted (matching the sub-item bars above) so
-    /// phases read as one continuous vertical spine rather than a list of
-    /// disconnected blocks.
+    /// connector bar matches the sub-item bars above so phases read as one
+    /// continuous vertical spine rather than a list of disconnected blocks.
     /// </summary>
     private void OpenPhase(string phase)
     {
-        if (!_isFirstPhase) AnsiConsole.MarkupLine($"{Gutter}[grey]│[/]");
+        if (!_isFirstPhase) AnsiConsole.MarkupLine($"{Gutter}│");
         AnsiConsole.MarkupLine(PhaseHeader(phase));
         _currentPhase = phase;
         _isFirstPhase = false;

@@ -16,4 +16,8 @@ public interface IChatService
         CancellationToken cancellationToken = default);
 
     Task<string[]> GetAvailableModelsAsync(CancellationToken cancellationToken = default);
+
+    Task<string[]> GetAvailableModelsAsync(string baseUrl, string? apiKey, CancellationToken cancellationToken = default);
+
+    void ClearModelCache();
 }

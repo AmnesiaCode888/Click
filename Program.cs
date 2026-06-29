@@ -51,6 +51,8 @@ Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;
     cts.Cancel();
+    // Закрываем stdin, чтобы Console.ReadLine() не завис навсегда
+    try { Console.OpenStandardInput().Close(); } catch { }
     AnsiConsole.MarkupLine("\n[red]Завершение работы...[/]");
 };
 

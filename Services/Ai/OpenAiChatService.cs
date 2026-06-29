@@ -44,7 +44,7 @@ public class OpenAiChatService : IChatService
             if (_cachedModels != null && DateTimeOffset.UtcNow < _cacheExpiresAt)
                 return _cachedModels;
 
-            return await FetchModelsAsync(cancellationToken).ConfigureAwait(false);
+            return await FetchModelsAsync(_options.BaseUrl, _options.ApiKey, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -52,13 +52,27 @@ public class OpenAiChatService : IChatService
         }
     }
 
-    private async Task<string[]> FetchModelsAsync(CancellationToken cancellationToken)
+    public async Task<string[]> GetAvailableModelsAsync(string baseUrl, string? apiKey, CancellationToken cancellationToken = default)
     {
+        return await FetchModelsAsync(baseUrl, apiKey, cancellationToken).ConfigureAwait(false);
+    }
+
+    public void ClearModelCache()
+    {
+        _cachedModels = null;
+        _cacheExpiresAt = DateTimeOffset.MinValue;
+    }
+
+    private async Task<string[]> FetchModelsAsync(string baseUrl, string? apiKey, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            return Array.Empty<string>();
+
         try
         {
-            var url = _options.BaseUrl.TrimEnd('/') + "/models";
+            var url = baseUrl.TrimEnd('/') + "/models";
             using var req = new HttpRequestMessage(HttpMethod.Get, url);
-            SetAuthHeaders(req, _options.ApiKey);
+            SetAuthHeaders(req, apiKey);
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(TimeSpan.FromSeconds(10));
@@ -79,9 +93,14 @@ public class OpenAiChatService : IChatService
                     if (item.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
                         list.Add(id.GetString()!);
                 }
-                _cachedModels = list.ToArray();
-                _cacheExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
-                return _cachedModels;
+                // Only cache when using the default endpoint from options
+                if (string.Equals(baseUrl, _options.BaseUrl, StringComparison.Ordinal)
+                    && string.Equals(apiKey, _options.ApiKey, StringComparison.Ordinal))
+                {
+                    _cachedModels = list.ToArray();
+                    _cacheExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5);
+                }
+                return list.ToArray();
             }
         }
         catch { }

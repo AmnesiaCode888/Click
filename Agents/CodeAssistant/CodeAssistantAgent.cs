@@ -11,6 +11,7 @@ public class CodeAssistantAgent : AgentBase
         TerminalToolHandler terminal,
         WebReadToolHandler webRead,
         SearchToolHandler search,
+        SubAgentToolHandler subAgent,
         SerperOptions serperOptions)
     {
         if (!string.IsNullOrEmpty(serperOptions.ApiKey))
@@ -32,6 +33,12 @@ public class CodeAssistantAgent : AgentBase
             "Работа с файлами проекта (read/write/append/edit/list/create_dir/move/copy/delete). " +
             "Сначала read, потом edit через SEARCH/REPLACE или write для больших изменений.",
             fileTool);
+
+        AddTool<AskAgentArgs>("ask_agent",
+            "Задать вопрос агенту-консультанту (QuestionAgent) для помощи в понимании кода. " +
+            "Используй, когда нужно разобраться в устройстве проекта, найти где что лежит, понять архитектуру или зависимости. " +
+            "Укажи agent_id='question' и сформулируй точный вопрос.",
+            subAgent);
     }
 
     public override string Id => "code";
