@@ -19,7 +19,8 @@ public class AgentRunner : IAgentRunner
 
     private static readonly Regex WhitespaceRegex = new(@"\s+", RegexOptions.Compiled);
 
-    private readonly List<string> _recentResponseTexts = new();
+    private static readonly string[] KnownFileActions =
+        ["read", "list", "glob", "read_tree", "write", "append", "delete", "edit", "create_dir", "delete_dir", "move", "copy"];
 
     public AgentRunner(
         IChatService chatService,
@@ -40,13 +41,12 @@ public class AgentRunner : IAgentRunner
         IProgress<AgentRunnerProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var (messages, tools, toolLog, maxIterations, loopWindow, recentFingerprints) =
+        var (messages, tools, toolLog, maxIterations) =
             BuildInitialContext(agent, context, userMessage, history);
 
         UsageInfo? totalUsage = null;
         int iteration = 0;
         AgentChatResponse? lastResponse = null;
-        _recentResponseTexts.Clear();
 
         progress?.Report(new AgentRunnerProgress(Title: "Анализирую запрос", Step: 0));
 
@@ -70,13 +70,8 @@ public class AgentRunner : IAgentRunner
             if (!string.IsNullOrEmpty(response.ReasoningContent))
                 progress?.Report(new AgentRunnerProgress(Reasoning: response.ReasoningContent, Step: iteration));
 
-            TrackResponseText(response);
-
             if (response.ToolCalls.Count == 0)
                 return await HandleNoToolCallsResponseAsync(response, messages, model, toolLog, totalUsage, cancellationToken);
-
-            if (DetectAndRecordLoop(response, recentFingerprints, loopWindow, agent, toolLog, totalUsage, lastResponse) is { } loopResult)
-                return loopResult;
 
             AppendAssistantTurn(messages, response);
             await ExecuteToolCallsAsync(agent, response, messages, toolLog, progress, iteration, cancellationToken);
@@ -89,9 +84,7 @@ public class AgentRunner : IAgentRunner
         List<ApiMessage> Messages,
         List<ApiTool> Tools,
         List<string> ToolLog,
-        int MaxIterations,
-        int LoopWindow,
-        Queue<string> RecentFingerprints)
+        int MaxIterations)
         BuildInitialContext(IAgent agent, AgentContext context, string userMessage, IReadOnlyList<ChatMessage>? history)
     {
         var systemPrompt = agent.GetSystemPrompt(context);
@@ -104,10 +97,7 @@ public class AgentRunner : IAgentRunner
         var toolLog = new List<string>();
 
         var maxIterations = _options.MaxIterations > 0 ? _options.MaxIterations : 15;
-        var loopWindow = _options.LoopDetectionWindow > 0 ? _options.LoopDetectionWindow : 2;
-        var recentFingerprints = new Queue<string>(loopWindow);
-
-        return (messages, tools, toolLog, maxIterations, loopWindow, recentFingerprints);
+        return (messages, tools, toolLog, maxIterations);
     }
 
     private AgentRunnerResult? CheckMaxIterations(
@@ -154,80 +144,6 @@ public class AgentRunner : IAgentRunner
             toolLog,
             totalUsage,
             response.ReasoningContent);
-    }
-
-    private AgentRunnerResult? DetectAndRecordLoop(
-        AgentChatResponse response,
-        Queue<string> recentFingerprints,
-        int loopWindow,
-        IAgent agent,
-        List<string> toolLog,
-        UsageInfo? totalUsage,
-        AgentChatResponse? lastResponse)
-    {
-        var fingerprint = BuildFingerprint(response);
-        var textFingerprint = BuildTextFingerprint(response);
-
-        // Check tool fingerprint loop
-        if (recentFingerprints.Contains(fingerprint))
-        {
-            var msg = "Агент зациклился на одинаковых вызовах инструментов. Выполнение прерывается.";
-            _logger.LogWarning(
-                "[Agent:{Agent}] Loop detected. Fingerprint: {Fingerprint}",
-                agent.GetType().Name, Truncate(fingerprint, 200));
-            toolLog.Add($"🔁 [Agent] Зацикливание — {msg}");
-            return new AgentRunnerResult(
-                msg + " Попробуй переформулировать запрос или изменить подход.",
-                toolLog,
-                totalUsage,
-                response.ReasoningContent);
-        }
-
-        // Check text similarity loop (Jaccard on word sets)
-        if (_recentResponseTexts.Count >= 3)
-        {
-            var currentWords = GetWordSet(textFingerprint);
-            var similarities = new List<double>();
-            foreach (var prevText in _recentResponseTexts)
-            {
-                var prevWords = GetWordSet(prevText);
-                var sim = JaccardSimilarity(currentWords, prevWords);
-                similarities.Add(sim);
-            }
-
-            var avgSimilarity = similarities.Average();
-            if (avgSimilarity > 0.75)
-            {
-                var msg = "Агент повторяет похожие рассуждения без прогресса. Выполнение прерывается.";
-                _logger.LogWarning(
-                    "[Agent:{Agent}] Text loop detected. Avg similarity: {Similarity:F2}",
-                    agent.GetType().Name, avgSimilarity);
-                toolLog.Add($"🔁 [Agent] Текстовое зацикливание — {msg}");
-                return new AgentRunnerResult(
-                    msg + " Попробуй переформулировать запрос или уточнить задачу.",
-                    toolLog,
-                    totalUsage,
-                    response.ReasoningContent);
-            }
-        }
-
-        recentFingerprints.Enqueue(fingerprint);
-        while (recentFingerprints.Count > loopWindow)
-            recentFingerprints.Dequeue();
-
-        return null;
-    }
-
-    private static string BuildFingerprint(AgentChatResponse response)
-    {
-        var keys = new List<string>(response.ToolCalls.Count);
-        foreach (var tc in response.ToolCalls)
-        {
-            var normalizedArgs = WhitespaceRegex.Replace(tc.ArgumentsJson ?? "", "");
-            keys.Add($"{tc.Name}:{normalizedArgs}");
-        }
-        keys.Sort(StringComparer.Ordinal);
-        return string.Join("||", keys);
     }
 
     private static void AppendAssistantTurn(List<ApiMessage> messages, AgentChatResponse response)
@@ -383,11 +299,43 @@ public class AgentRunner : IAgentRunner
     private static string FormatToolLogEntry(string name, string argsJson, string result)
     {
         var args = TryParseArgs(argsJson);
-        var arg = args.GetValueOrDefault("query") ?? args.GetValueOrDefault("command") ?? args.GetValueOrDefault("url")
-            ?? args.GetValueOrDefault("path")
-            ?? args.Values.FirstOrDefault(v => !string.IsNullOrEmpty(v));
+        string arg;
+        string? action = null;
+
+        if (name == "file")
+        {
+            // For file tool surface the action explicitly so the UI can
+            // phase-classify reads vs. mutations and Russian-localise verbs.
+            action = args.GetValueOrDefault("action");
+            // Fallback: try to guess action from non-standard keys (e.g.
+            // if the LLM sent {"path":"...","read":true} instead of
+            // {"action":"read","path":"..."}). Without this, the UI would
+            // show bare "file" and misclassify reads as actions.
+            if (string.IsNullOrEmpty(action))
+                action = KnownFileActions.FirstOrDefault(a => args.ContainsKey(a));
+            // Guard against a bare "file" prefix when the LLM omitted the
+            // action entirely. "unknown" keeps the log parseable and lets the
+            // observer localise it instead of printing the raw tool name.
+            if (string.IsNullOrEmpty(action))
+                action = "unknown";
+            if (action == "glob")
+                arg = args.GetValueOrDefault("pattern") ?? args.GetValueOrDefault("path") ?? "";
+            else
+                arg = args.GetValueOrDefault("path")
+                    ?? args.Values.FirstOrDefault(v => !string.IsNullOrEmpty(v) && v != action)
+                    ?? "";
+        }
+        else
+        {
+            arg = args.GetValueOrDefault("query") ?? args.GetValueOrDefault("command") ?? args.GetValueOrDefault("url")
+                ?? args.Values.FirstOrDefault(v => !string.IsNullOrEmpty(v))
+                ?? "";
+        }
+
         var argStr = string.IsNullOrEmpty(arg) ? "" : (arg.Length > 50 ? arg[..47] + "…" : arg);
-        var argPart = string.IsNullOrEmpty(argStr) ? name : $"{name} {argStr}";
+        var prefix = action != null ? $"{name} {action}" : name;
+        var argPart = string.IsNullOrEmpty(argStr) ? prefix : $"{prefix} {argStr}";
+
         var preview = result.StartsWith("Ошибка", StringComparison.OrdinalIgnoreCase)
             ? result
             : result.Length > 250 ? result[..247] + "…" : result;
@@ -418,38 +366,34 @@ public class AgentRunner : IAgentRunner
     private static string Truncate(string s, int max)
         => s.Length <= max ? s : s[..max] + "…";
 
-    private void TrackResponseText(AgentChatResponse response)
-    {
-        var text = response.Content?.Trim() ?? "";
-        if (string.IsNullOrEmpty(text)) return;
-
-        _recentResponseTexts.Add(text);
-        while (_recentResponseTexts.Count > 5)
-            _recentResponseTexts.RemoveAt(0);
-    }
-
     private void InjectCorrectionIfNeeded(List<ApiMessage> messages, List<string> toolLog)
     {
-        // Check last 5 tool log entries for errors
+        // Look at the last 5 tool-log entries:
+        //   - keep the latest error per distinct tool for the targeted prompt;
+        //   - count TOTAL occurrences so we fire on repсаeat-error too (not just distinct tools).
         var errorEntries = new List<(string Entry, string ToolName)>();
+        int totalRecentErrors = 0;
         for (int i = toolLog.Count - 1; i >= 0 && i >= toolLog.Count - 5; i--)
         {
             if (toolLog[i].Contains("Ошибка", StringComparison.OrdinalIgnoreCase))
             {
+                totalRecentErrors++;
                 var spaceIdx = toolLog[i].IndexOf(' ');
                 var toolName = spaceIdx > 0 ? toolLog[i][..spaceIdx].Trim() : "unknown";
-                // Keep only the LAST error per tool type for de-duplication
                 if (!errorEntries.Any(e => e.ToolName == toolName))
                     errorEntries.Add((toolLog[i], toolName));
             }
         }
 
-        if (errorEntries.Count < 2) return;
+        // Fire on either: 2+ distinct tools erroring, OR the same tool erroring
+        // 2+ times in a row. The third-repeated error from the previous run
+        // (e.g. glob-without-path three times) is a real loop the LLM needs to break.
+        if (errorEntries.Count < 2 && totalRecentErrors < 2) return;
 
         var correctionPrompt = BuildTargetedCorrection(errorEntries);
         messages.Add(new ApiMessage("user", correctionPrompt));
-        _logger.LogInformation("[Agent] Targeted correction injected for {Count} distinct tool errors: {Tools}",
-            errorEntries.Count, string.Join(", ", errorEntries.Select(e => e.ToolName)));
+        _logger.LogInformation("[Agent] Targeted correction injected ({Distinct} distinct / {Total} total recent errors)",
+            errorEntries.Count, totalRecentErrors);
     }
 
     private static string BuildTargetedCorrection(List<(string Entry, string ToolName)> errors)
@@ -470,6 +414,15 @@ public class AgentRunner : IAgentRunner
                 sb.AppendLine("   → СКОПИРУЙ точный текст (включая пробелы и отступы) из вывода read.");
                 sb.AppendLine("   → Вставь скопированный текст в SEARCH-блок.");
                 sb.AppendLine("   → НЕ угадывай содержимое файла.");
+            }
+            else if (toolName == "file" && entry.Contains("укажите path", StringComparison.OrdinalIgnoreCase))
+            {
+                sb.AppendLine("📁 file: забыл указать 'path'.");
+                sb.AppendLine("   → path ОБЯЗАТЕЛЕН для всех action КРОМЕ 'list' (для list path=\".\" подразумевается).");
+                sb.AppendLine("   → Для glob: передавай ОБА path (корневая папка) И pattern (маска).");
+                sb.AppendLine("     Пример: {action:\"glob\", path:\"Agents\", pattern:\"**/*.cs\"}");
+                sb.AppendLine("   → Для read/list/glob/etc.: path — относительный путь к файлу/папке от корня проекта.");
+                sb.AppendLine("   → НЕ ВЫЗЫВАЙ glob без path — ты уже пробовал, и это не пройдёт. Перечитай сигнатуру тула.");
             }
             else if (toolName == "file" && entry.Contains("не найден", StringComparison.OrdinalIgnoreCase))
             {
@@ -516,24 +469,6 @@ public class AgentRunner : IAgentRunner
 
         sb.Append("План: кратко опиши, что ты изменишь в подходе, и действуй.");
         return sb.ToString();
-    }
-
-    private static string BuildTextFingerprint(AgentChatResponse response)
-    {
-        var text = CleanContent(response.Content?.Trim() ?? "");
-        if (text.Length > 500)
-            text = text[..500];
-        return text;
-    }
-
-    private static HashSet<string> GetWordSet(string text)
-    {
-        var words = text.ToLowerInvariant()
-            .Split(new[] { ' ', '\n', '\r', '\t', ',', '.', ':', ';', '!', '?', '-', '(', ')', '[', ']', '{', '}' },
-                StringSplitOptions.RemoveEmptyEntries)
-            .Where(w => w.Length > 2)
-            .ToHashSet(StringComparer.Ordinal);
-        return words;
     }
 
     private static string SummarizeToolResult(ApiMessage toolMsg)
@@ -620,11 +555,4 @@ public class AgentRunner : IAgentRunner
         return string.Join('\n', lines.Take(maxLines)) + $"\n... (ещё {lines.Length - maxLines} строк)";
     }
 
-    private static double JaccardSimilarity(HashSet<string> a, HashSet<string> b)
-    {
-        if (a.Count == 0 && b.Count == 0) return 1.0;
-        var intersection = a.Intersect(b).Count();
-        var union = a.Union(b).Count();
-        return union == 0 ? 0 : (double)intersection / union;
-    }
 }

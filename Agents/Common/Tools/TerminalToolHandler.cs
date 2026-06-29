@@ -1,9 +1,6 @@
-using System.Diagnostics;
-using System.Runtime.InteropServices;
+﻿using System.Diagnostics;
 using System.Text;
 using System.Text.Json.Serialization;
-using System.Text.Json;
-using System.Text.RegularExpressions;
 using AgentSharp;
 using Microsoft.Extensions.Logging;
 
@@ -11,220 +8,171 @@ namespace Click.Agents.Common.Tools;
 
 public class TerminalToolHandler : IToolHandler
 {
-    private static readonly bool IsWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
-    private static readonly string ShellName = ResolveShellName();
-
-    private static readonly Regex CmdSwitchPattern = new(
-        @"\s/[A-Za-z]+\b",
-        RegexOptions.Compiled);
-
-    private static readonly Regex CmdOnlyCommandPattern = new(
-        @"\b(cmd|findstr|xcopy|robocopy|mklink)\b",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
-    private readonly ILogger<TerminalToolHandler> _logger;
+    private readonly string _workspacePath;
     private readonly TerminalToolOptions _options;
+    private readonly ILogger<TerminalToolHandler> _logger;
 
-    public TerminalToolHandler(
-        ILogger<TerminalToolHandler> logger,
-        TerminalToolOptions options)
+    public TerminalToolHandler(string workspacePath, TerminalToolOptions options, ILogger<TerminalToolHandler> logger)
     {
-        _logger = logger;
+        _workspacePath = Path.GetFullPath(workspacePath);
         _options = options;
+        _logger = logger;
     }
 
-    private static string ResolveShellName()
+    public string Name => "terminal";
+
+    public string Description => "Выполнение команд в терминале проекта (dotnet, npm, git, build, test и т.д.)";
+
+    public Type ArgsType => typeof(TerminalArgs);
+
+    public async Task<ToolResult> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
     {
-        if (!IsWindows)
-            return "/bin/sh";
+        var args = System.Text.Json.JsonSerializer.Deserialize<TerminalArgs>(argumentsJson)
+            ?? throw new ArgumentException("Не удалось десериализовать аргументы");
+
+        var workingDirectory = args.WorkingDirectory != null
+            ? Path.GetFullPath(args.WorkingDirectory, _workspacePath)
+            : _workspacePath;
+
+        // Проверяем, что рабочая директория находится в пределах workspace
+        var normalizedWorkspace = _workspacePath.EndsWith(Path.DirectorySeparatorChar)
+            ? _workspacePath
+            : _workspacePath + Path.DirectorySeparatorChar;
+
+        if (!workingDirectory.StartsWith(normalizedWorkspace, StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(workingDirectory, _workspacePath, StringComparison.OrdinalIgnoreCase))
+        {
+            return ToolResult.FromString(
+                $"Ошибка: рабочая директория '{workingDirectory}' выходит за пределы workspace '{_workspacePath}'");
+        }
+
+        var command = args.Command?.Trim();
+        if (string.IsNullOrEmpty(command))
+            return ToolResult.FromString("Команда не указана");
+
+        var timeoutSeconds = args.TimeoutSeconds ?? _options.DefaultTimeoutSeconds;
+        timeoutSeconds = Math.Clamp(timeoutSeconds, _options.MinTimeoutSeconds, _options.MaxTimeoutSeconds);
+
+        var shellHint = BuildShellHint(command);
 
         try
         {
-            var ps7 = FindProgramInPath("pwsh.exe");
-            if (!string.IsNullOrEmpty(ps7))
-                return ps7;
+            var (isWindows, shell, shellArg) = DetectShell();
+            var psi = new ProcessStartInfo
+            {
+                FileName = shell,
+                Arguments = isWindows ? $"{shellArg} \"{command}\"" : $"{shellArg} \"{command}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                WorkingDirectory = workingDirectory
+            };
+
+            using var process = new Process { StartInfo = psi };
+            var output = new StringBuilder();
+            var error = new StringBuilder();
+
+            process.OutputDataReceived += (_, e) => { if (e.Data != null) output.AppendLine(e.Data); };
+            process.ErrorDataReceived += (_, e) => { if (e.Data != null) error.AppendLine(e.Data); };
+
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            var completed = await Task.Run(() => process.WaitForExit(timeoutSeconds * 1000), cancellationToken);
+
+            if (!completed)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                return ToolResult.FromString(FormatError($"команда не завершилась за {timeoutSeconds}с", shellHint));
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                return ToolResult.FromString(FormatError("команда отменена", shellHint));
+            }
+
+            var outStr = output.ToString().TrimEnd();
+            var errStr = error.ToString().TrimEnd();
+            var hasErrorOutput = !string.IsNullOrEmpty(errStr);
+            var exitedWithError = process.ExitCode != 0;
+
+            var result = new StringBuilder();
+            if (!string.IsNullOrEmpty(outStr))
+                result.Append(outStr);
+            if (hasErrorOutput)
+                result.Append(result.Length > 0 ? "\n--- stderr ---\n" : "").Append(errStr);
+
+            var resultStr = result.Length > 0 ? result.ToString() : "(пусто)";
+
+            if (exitedWithError || (hasErrorOutput && string.IsNullOrEmpty(outStr)))
+            {
+                resultStr = FormatError(
+                    $"код возврата {process.ExitCode}.\n{resultStr}",
+                    shellHint ?? BuildShellHint(command));
+            }
+            else if (shellHint != null)
+            {
+                resultStr = $"{resultStr}\n\n[подсказка: {shellHint}]";
+            }
+
+            var maxOutputLen = _options.MaxOutputChars > 0 ? _options.MaxOutputChars : 6000;
+            if (resultStr.Length > maxOutputLen)
+            {
+                var tail = resultStr[^maxOutputLen..];
+                resultStr = $"[... вывод обрезан, показаны последние {maxOutputLen} символов ...]\n" + tail;
+            }
+            return ToolResult.Structured(new { Command = command, Stdout = outStr, Stderr = errStr, ExitCode = process.ExitCode }, resultStr);
         }
-        catch { }
-
-        return "powershell.exe";
-    }
-
-    private static string? FindProgramInPath(string fileName)
-    {
-        var pathEnv = Environment.GetEnvironmentVariable("PATH") ?? "";
-        var paths = pathEnv.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-        foreach (var path in paths)
+        catch (OperationCanceledException)
         {
-            var fullPath = Path.Combine(path, fileName);
-            if (File.Exists(fullPath))
-                return fullPath;
-        }
-        return null;
-    }
-
-    public Task<ToolResult> ExecuteAsync(string argumentsJson, CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            if (!ToolArgumentValidator.TryValidateJson<TerminalArgs>(argumentsJson, out var args, out var err) || args == null)
-                return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error(
-                    "Ошибка terminal", "неверные arguments для terminal. " + (err ?? ""),
-                    null)));
-
-            if (string.IsNullOrWhiteSpace(args.Command))
-                return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error("Ошибка terminal", "укажите command", null)));
-
-            var defaultTimeout = _options.DefaultTimeoutSeconds > 0 ? _options.DefaultTimeoutSeconds : 60;
-            var minTimeout = _options.MinTimeoutSeconds > 0 ? _options.MinTimeoutSeconds : 1;
-            var maxTimeout = _options.MaxTimeoutSeconds > 0 ? _options.MaxTimeoutSeconds : 300;
-            var timeoutMs = args.TimeoutSeconds.HasValue
-                ? Math.Clamp(args.TimeoutSeconds.Value * 1000, minTimeout * 1000, maxTimeout * 1000)
-                : defaultTimeout * 1000;
-
-            var command = args.Command.Trim();
-            var workingDir = string.IsNullOrWhiteSpace(args.WorkingDirectory) ? null : args.WorkingDirectory.Trim();
-            _logger.LogInformation("[Terminal] {Command} (cwd: {Cwd})", command, workingDir ?? ".");
-
-            var shellHint = BuildShellHint(command);
-            if (shellHint != null)
-                _logger.LogInformation("[Terminal] {Hint}", shellHint);
-
-            return RunCommandAsync(command, timeoutMs, shellHint, workingDir, cancellationToken);
+            return ToolResult.FromString(FormatError("команда отменена", shellHint));
         }
         catch (Exception ex)
         {
-            return Task.FromResult(ToolResult.FromString(ToolResultFormatter.Error("Ошибка terminal", ex.Message, null)));
+            _logger.LogError(ex, "Terminal tool error");
+            return ToolResult.FromString($"Ошибка: {ex.Message}");
         }
+    }
+
+    private static (bool isWindows, string shell, string shellArg) DetectShell()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            // Prefer PowerShell on Windows
+            return (true, "powershell", "-NoProfile -Command");
+        }
+        return (false, "/bin/sh", "-c");
     }
 
     private static string? BuildShellHint(string command)
     {
-        if (!IsWindows)
-            return null;
-
-        if (CmdOnlyCommandPattern.IsMatch(command))
-            return $"команда выполняется в PowerShell ({Path.GetFileName(ShellName)}), а не в cmd.exe; команды cmd-only недоступны";
-
-        var tokens = command.Split(new[] { ' ', '&', '|', ';', '<', '>' }, StringSplitOptions.RemoveEmptyEntries);
-        var first = tokens.FirstOrDefault();
-        if (string.IsNullOrEmpty(first))
-            return null;
-
-        var psBuiltins = new[] { "dir", "cd", "copy", "move", "del", "erase", "type", "echo", "find", "md", "mkdir", "rd", "rmdir" };
-        if (psBuiltins.Contains(first, StringComparer.OrdinalIgnoreCase) && CmdSwitchPattern.IsMatch(command))
-            return $"команда '{first}' выполняется в PowerShell ({Path.GetFileName(ShellName)}), используй -Switch вместо /switch; например, dir -Name";
-
+        if (OperatingSystem.IsWindows())
+        {
+            // Detect cmd-style flags that won't work in PowerShell
+            if (command.Contains(" /") && !command.Contains(" /?"))
+            {
+                var parts = command.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                foreach (var part in parts)
+                {
+                    if (part.StartsWith('/') && part.Length > 1 && char.IsLetter(part[1]))
+                        return $"В PowerShell используй '-' вместо '/' для флагов (например, -Recurse вместо /s)";
+                }
+            }
+        }
         return null;
     }
 
-    private static string FormatError(string message, string? hint)
+    private static string FormatError(string message, string? shellHint = null)
     {
-        var sb = new StringBuilder();
-        sb.Append($"Ошибка terminal: {message}");
-        if (!string.IsNullOrEmpty(hint))
-            sb.Append($"\n{hint}");
-        sb.Append($"\n[контекст: команда выполнялась в {Path.GetFileName(ShellName)}]");
-        return sb.ToString();
-    }
-
-
-
-    private static string EscapePowerShellCommand(string command)
-    {
-        return command.Replace("\"", "\\\"");
-    }
-
-    private async Task<ToolResult> RunCommandAsync(string command, int timeoutMs, string? shellHint, string? workingDirectory, CancellationToken ct)
-    {
-        var psi = new ProcessStartInfo
-        {
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            WorkingDirectory = workingDirectory ?? Directory.GetCurrentDirectory()
-        };
-
-        if (IsWindows)
-        {
-            psi.FileName = ShellName;
-            psi.Arguments = $"-NoProfile -ExecutionPolicy Bypass -Command \"{EscapePowerShellCommand(command)}\"";
-        }
-        else
-        {
-            psi.FileName = "/bin/sh";
-            psi.Arguments = $"-c \"{command.Replace("\"", "\\\"")}\"";
-        }
-
-        var output = new StringBuilder();
-        var error = new StringBuilder();
-
-        using var process = new Process { StartInfo = psi };
-
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data != null) output.AppendLine(e.Data);
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data != null) error.AppendLine(e.Data);
-        };
-
-        process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-
-        using var timeoutCts = new CancellationTokenSource(timeoutMs);
-        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
-
-        try
-        {
-            await process.WaitForExitAsync(linkedCts.Token);
-        }
-        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
-        {
-            try { process.Kill(entireProcessTree: true); } catch (Exception killEx) { _logger.LogWarning(killEx, "Failed to kill timed-out process"); }
-            return ToolResult.FromString(FormatError($"превышено время ожидания ({timeoutMs / 1000} сек). Команда прервана.\nВывод до прерывания:\n{output}", shellHint));
-        }
-        catch (OperationCanceledException)
-        {
-            try { process.Kill(entireProcessTree: true); } catch (Exception killEx) { _logger.LogWarning(killEx, "Failed to kill cancelled process"); }
-            return ToolResult.FromString(FormatError("команда отменена", shellHint));
-        }
-
-        var outStr = output.ToString().TrimEnd();
-        var errStr = error.ToString().TrimEnd();
-        var hasErrorOutput = !string.IsNullOrEmpty(errStr);
-        var exitedWithError = process.ExitCode != 0;
-
-        var result = new StringBuilder();
-        if (!string.IsNullOrEmpty(outStr))
-            result.Append(outStr);
-        if (hasErrorOutput)
-            result.Append(result.Length > 0 ? "\n--- stderr ---\n" : "").Append(errStr);
-
-        var resultStr = result.Length > 0 ? result.ToString() : "(пусто)";
-
-        if (exitedWithError || (hasErrorOutput && string.IsNullOrEmpty(outStr)))
-        {
-            resultStr = FormatError(
-                $"код выхода {process.ExitCode}.\n{resultStr}",
-                shellHint ?? BuildShellHint(command));
-        }
-        else if (shellHint != null)
-        {
-            resultStr = $"{resultStr}\n\n[подсказка: {shellHint}]";
-        }
-
-        var maxOutputLen = _options.MaxOutputChars > 0 ? _options.MaxOutputChars : 6000;
-        if (resultStr.Length > maxOutputLen)
-        {
-            var tail = resultStr[^maxOutputLen..];
-            resultStr = $"[... вывод обрезан, показаны последние {maxOutputLen} символов ...]\n" + tail;
-        }
-        return ToolResult.Structured(new { Command = command, Stdout = outStr, Stderr = errStr, ExitCode = process.ExitCode }, resultStr);
+        var result = $"Ошибка: {message}";
+        if (shellHint != null)
+            result += $"\n\n[подсказка: {shellHint}]";
+        return result;
     }
 }
 

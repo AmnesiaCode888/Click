@@ -242,7 +242,6 @@ dotnet publish Click.csproj -c Release -o ./out
 {
   "Agent": {
     "MaxIterations": 2000,
-    "LoopDetectionWindow": 2,
     "MaxToolResultCharsKeep": 2500,
     "MaxToolResultCharsSuccess": 400,
     "PreserveRecentToolRounds": 2
@@ -274,7 +273,7 @@ dotnet publish Click.csproj -c Release -o ./out
 
 | Секция / Section | Описание / Description |
 |---|---|
-| `Agent` | `MaxIterations` — максимальное число итераций ReAct-цикла; `LoopDetectionWindow` — окно детекции повторяющихся вызовов инструментов; `MaxToolResultCharsKeep` / `MaxToolResultCharsSuccess` — лимиты длины результатов инструментов в истории; `PreserveRecentToolRounds` — сколько последних tool-раундов сохранять полностью. / `MaxIterations` limits the ReAct loop; `LoopDetectionWindow` detects repeated tool calls; result size limits control history compaction. |
+| `Agent` | `MaxIterations` — максимальное число итераций ReAct-цикла; `MaxToolResultCharsKeep` / `MaxToolResultCharsSuccess` — лимиты длины результатов инструментов в истории; `PreserveRecentToolRounds` — сколько последних tool-раундов сохранять полностью. / `MaxIterations` limits the ReAct loop; result size limits control history compaction. |
 | `Chat` | `MaxHistoryMessages` — максимальное число сообщений в истории; `MaxHistoryChars` — максимальное число символов. / `MaxHistoryMessages` and `MaxHistoryChars` cap the chat history sent to the LLM. |
 | `File` | `MaxReadChars` — максимальный размер читаемого файла; `DefaultReadLimit` — лимит строк по умолчанию. / `MaxReadChars` caps file size; `DefaultReadLimit` is the default line limit. |
 | `Search` | `DefaultMaxResults` — число результатов по умолчанию; `MinMaxResults` / `MaxMaxResults` — допустимые границы, запрашиваемые у агента. / `DefaultMaxResults` and min/max bounds for search result count. |
