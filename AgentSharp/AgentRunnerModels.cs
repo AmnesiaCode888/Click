@@ -12,7 +12,8 @@ public record AgentRunnerProgress(
     string? Tool = null,
     string? Status = null,
     string? FilePreview = null,
-    string? Reasoning = null);
+    string? Reasoning = null,
+    string? StreamingContent = null);
 
 public record AgentRunnerResult(
     string Content,

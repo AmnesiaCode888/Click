@@ -17,17 +17,20 @@ public class SubAgentToolHandler : IToolHandler
     private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<SubAgentToolHandler> _logger;
     private readonly ClickWorkspaceOptions _workspaceOptions;
+    private readonly ConversationHistoryProvider _conversationHistory;
 
     public SubAgentToolHandler(
         IAgentRunner runner,
         IServiceProvider serviceProvider,
         ILogger<SubAgentToolHandler> logger,
-        ClickWorkspaceOptions workspaceOptions)
+        ClickWorkspaceOptions workspaceOptions,
+        ConversationHistoryProvider conversationHistory)
     {
         _runner = runner;
         _serviceProvider = serviceProvider;
         _logger = logger;
         _workspaceOptions = workspaceOptions;
+        _conversationHistory = conversationHistory;
     }
 
     public string Name => "ask_agent";
@@ -52,6 +55,12 @@ public class SubAgentToolHandler : IToolHandler
             var question = args.Question?.Trim();
             if (string.IsNullOrEmpty(question))
                 return ToolResult.FromString("Ошибка: укажи вопрос (question)");
+
+            // Prepend parent agent's recent context so sub-agent knows what's already been done
+            var parentContext = _conversationHistory.RecentContext;
+            var effectiveQuestion = string.IsNullOrEmpty(parentContext)
+                ? question
+                : $"{parentContext}\n\n[Вопрос от родительского агента]\n{question}";
 
             // Validate agent exists (resolve lazily to avoid circular dependency at construction)
             var registry = _serviceProvider.GetRequiredService<IAgentRegistry>();
@@ -82,7 +91,7 @@ public class SubAgentToolHandler : IToolHandler
             var result = await _runner.RunAsync(
                 subAgent,
                 context,
-                question,
+                effectiveQuestion,
                 history: null,
                 model: null,
                 progress: null,

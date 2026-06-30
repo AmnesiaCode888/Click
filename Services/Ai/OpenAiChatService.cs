@@ -119,14 +119,15 @@ public class OpenAiChatService : IChatService
         if (history != null)
             messages.AddRange(history.ToApiMessages());
         messages.Add(new ApiMessage("user", userMessage));
-        return await ChatWithMessagesAsync(messages, tools, model, cancellationToken);
+        return await ChatWithMessagesAsync(messages, tools, model, cancellationToken, contentStream: null);
     }
 
     public async Task<AgentChatResponse> ChatWithMessagesAsync(
         IReadOnlyList<ApiMessage> messages,
         IReadOnlyList<ApiTool>? tools = null,
         string? model = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<string>? contentStream = null)
     {
         var maxAttempts = Math.Max(1, _options.RetryMaxAttempts);
         Exception? lastEx = null;
@@ -137,7 +138,7 @@ public class OpenAiChatService : IChatService
 
             try
             {
-                return await SendSingleRequestAsync(messages, tools, model, cancellationToken);
+                return await SendSingleRequestAsync(messages, tools, model, cancellationToken, contentStream);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < maxAttempts)
             {
@@ -169,7 +170,8 @@ public class OpenAiChatService : IChatService
         IReadOnlyList<ApiMessage> messages,
         IReadOnlyList<ApiTool>? tools,
         string? model,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<string>? contentStream = null)
     {
         var (baseUrl, apiKey, effectiveModel) = ResolveEndpointAndModel(model);
         var isLocalEndpoint = baseUrl.Contains("localhost") || baseUrl.Contains("127.0.0.1");
@@ -206,7 +208,7 @@ public class OpenAiChatService : IChatService
             throw new InvalidOperationException($"API error {statusCode}: {body}|{retryAfter?.TotalSeconds ?? 0}");
         }
 
-        return await ParseStreamedResponseAsync(response, cts.Token);
+        return await ParseStreamedResponseAsync(response, cts.Token, contentStream);
     }
 
     private static TimeSpan ComputeDelay(int attempt, int baseDelayMs, bool isTimeout)
@@ -264,7 +266,7 @@ public class OpenAiChatService : IChatService
         return (_options.BaseUrl, _options.ApiKey, m);
     }
 
-    private static async Task<AgentChatResponse> ParseStreamedResponseAsync(HttpResponseMessage response, CancellationToken ct)
+    private static async Task<AgentChatResponse> ParseStreamedResponseAsync(HttpResponseMessage response, CancellationToken ct, IProgress<string>? contentStream = null)
     {
         using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var reader = new StreamReader(stream);
@@ -301,13 +303,17 @@ public class OpenAiChatService : IChatService
                     continue;
 
                 var choice = choices[0];
-                var delta = choice.GetProperty("delta");
+                if (!choice.TryGetProperty("delta", out var delta))
+                    continue;
 
                 if (delta.TryGetProperty("content", out var contentProp))
                 {
                     var text = contentProp.GetString();
                     if (!string.IsNullOrEmpty(text))
+                    {
                         contentBuilder.Append(text);
+                        contentStream?.Report(text);
+                    }
                 }
 
                 if (delta.TryGetProperty("reasoning_content", out var rc))

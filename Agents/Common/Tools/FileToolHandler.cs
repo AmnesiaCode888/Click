@@ -37,12 +37,8 @@ public class FileToolHandler : IToolHandler
             var args = System.Text.Json.JsonSerializer.Deserialize<FileArgs>(argumentsJson)
                 ?? throw new ArgumentException("Не удалось десериализовать аргументы");
 
-<<<<<<< Updated upstream
-=======
             if (string.IsNullOrEmpty(args.Action) && !_allowWrite)
                 args = args with { Action = "read" };
-
->>>>>>> Stashed changes
             if (!_allowWrite && !ReadOnlyActions.Contains(args.Action ?? ""))
                 return Task.FromResult(ToolResult.FromString("Ошибка: этот агент работает только на чтение. Запрещённые действия: write, append, delete, edit, create_dir, delete_dir, move, copy."));
 
@@ -157,10 +153,9 @@ public class FileToolHandler : IToolHandler
         if (!File.Exists(path))
             return ToolResult.FromString($"Файл '{args.Path}' не найден");
 
-        var content = File.ReadAllText(path);
+        var fileContent = File.ReadAllText(path);
         var contentArg = args.Content ?? "";
 
-        // Parse SEARCH/REPLACE block
         var searchMarker = "<<<<<<< SEARCH";
         var dividerMarker = "=======";
         var replaceMarker = ">>>>>>> REPLACE";
@@ -181,13 +176,100 @@ public class FileToolHandler : IToolHandler
         if (replace.EndsWith('\n') || replace.EndsWith('\r'))
             replace = replace.TrimEnd('\n', '\r');
 
-        var searchIdxInFile = content.IndexOf(search, StringComparison.Ordinal);
-        if (searchIdxInFile < 0)
-            return ToolResult.FromString("Ошибка: SEARCH-блок не найден в файле");
+        // Normalize line endings for matching only (don't modify the original file's line endings on write)
+        var normalizedSearch = search.Replace("\r\n", "\n").Replace("\r", "\n");
+        var normalizedFile = fileContent.Replace("\r\n", "\n").Replace("\r", "\n");
 
-        var newContent = content[..searchIdxInFile] + replace + content[(searchIdxInFile + search.Length)..];
+        int searchIdxInFile;
+
+        // Try exact match on normalized content
+        searchIdxInFile = normalizedFile.IndexOf(normalizedSearch, StringComparison.Ordinal);
+        if (searchIdxInFile < 0)
+        {
+            // Try fuzzy match: trim whitespace from each line, find approximate region
+            var searchLines = normalizedSearch.Split('\n');
+            var fileLines = normalizedFile.Split('\n');
+            var matchLine = FindFuzzyMatch(fileLines, searchLines);
+            if (matchLine >= 0)
+            {
+                // Compute byte offset to the fuzzy-matched line
+                searchIdxInFile = 0;
+                for (int i = 0; i < matchLine; i++)
+                    searchIdxInFile += fileLines[i].Length + 1;
+
+                // Now find the exact position of normalizedSearch within a window
+                var windowStart = Math.Max(0, searchIdxInFile - fileLines[matchLine].Length);
+                var windowEnd = Math.Min(normalizedFile.Length + 1, searchIdxInFile + normalizedSearch.Length + fileLines[matchLine].Length * 3);
+                var exactInWindow = normalizedFile.IndexOf(normalizedSearch, windowStart, windowEnd - windowStart, StringComparison.Ordinal);
+                searchIdxInFile = exactInWindow >= 0 ? exactInWindow : -1;
+            }
+        }
+
+        if (searchIdxInFile < 0)
+        {
+            var searchFirstLine = search.TrimStart().Split('\n')[0].Trim();
+            var hint = $"Точный текст не найден. Сначала вызови file read \"{args.Path}\", скопируй нужный фрагмент и вставь в SEARCH-блок.";
+            if (searchFirstLine.Length > 0 && searchFirstLine.Length < 80)
+                hint += $"\nИскали: \"{searchFirstLine}\"";
+            return ToolResult.FromString($"Ошибка: SEARCH-блок не найден в файле.\n{hint}");
+        }
+
+        // Replace in original fileContent (not normalized) to preserve line endings.
+        // Map the normalized offset back to the original file.
+        var normToOrigOffset = MapNormalizedOffsetToOriginal(fileContent, searchIdxInFile);
+        var normToOrigEnd = MapNormalizedOffsetToOriginal(fileContent, searchIdxInFile + normalizedSearch.Length);
+        var newContent = fileContent[..normToOrigOffset] + replace + fileContent[normToOrigEnd..];
         File.WriteAllText(path, newContent);
         return ToolResult.FromString($"Изменено: {args.Path}");
+    }
+
+    /// <summary>
+    /// Maps a character offset in the normalized text (all \n) back to the original text
+    /// (which may contain \r\n). This preserves the original line endings on write.
+    /// </summary>
+    private static int MapNormalizedOffsetToOriginal(string original, int normOffset)
+    {
+        int origPos = 0;
+        int normPos = 0;
+        while (normPos < normOffset && origPos < original.Length)
+        {
+            if (original[origPos] == '\r')
+            {
+                // Skip \r — it's absent from normalized text
+            }
+            else
+            {
+                normPos++;
+            }
+            origPos++;
+        }
+        return origPos;
+    }
+
+    private static int FindFuzzyMatch(string[] fileLines, string[] searchLines)
+    {
+        if (searchLines.Length == 0 || fileLines.Length < searchLines.Length)
+            return -1;
+
+        for (int i = 0; i <= fileLines.Length - searchLines.Length; i++)
+        {
+            bool match = true;
+            for (int j = 0; j < searchLines.Length; j++)
+            {
+                var fileLine = fileLines[i + j].Trim();
+                var searchLine = searchLines[j].Trim();
+                if (string.IsNullOrEmpty(fileLine) && string.IsNullOrEmpty(searchLine))
+                    continue;
+                if (fileLine != searchLine)
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+                return i;
+        }
+        return -1;
     }
 
     private ToolResult HandleCreateDir(FileArgs args)
@@ -325,7 +407,7 @@ public class FileToolHandler : IToolHandler
         if (!Directory.Exists(path))
             return ToolResult.FromString($"Директория '{args.Path}' не найдена");
 
-        var maxDepth = args.MaxDepth ?? 3;
+        var maxDepth = Math.Clamp(args.MaxDepth ?? 3, 1, 10);
         var result = new List<string>();
         ReadTreeRecursive(path, "", 0, maxDepth, result);
         return ToolResult.FromString(string.Join("\n", result));

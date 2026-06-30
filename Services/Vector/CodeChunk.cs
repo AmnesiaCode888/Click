@@ -11,7 +11,10 @@ public record CodeChunk(
     int EndLine,
     string Content,
     string FileHash,
-    float[] Embedding);
+    float[] Embedding)
+{
+    public float CosineScore { get; set; }
+}
 
 public record SemanticSearchResult(
     string FilePath,

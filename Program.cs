@@ -20,6 +20,10 @@ static void ConfigureServices(IServiceCollection services, IConfiguration config
     services.Configure<ClickWorkspaceOptions>(configuration.GetSection(ClickWorkspaceOptions.SectionName));
     services.AddSingleton(configuration.GetSection(ClickWorkspaceOptions.SectionName).Get<ClickWorkspaceOptions>() ?? new ClickWorkspaceOptions());
 
+    var apiSection = configuration.GetSection(ApiServer.ApiOptions.SectionName);
+    services.Configure<ApiServer.ApiOptions>(apiSection);
+    services.AddSingleton(apiSection.Get<ApiServer.ApiOptions>() ?? new ApiServer.ApiOptions());
+
     services.AddHttpClient<OpenAiChatService>()
     .ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(60));
     services.AddHttpClient();
@@ -68,8 +72,30 @@ var services = new ServiceCollection();
 ConfigureServices(services, configWithWorkspace);
 var serviceProvider = services.BuildServiceProvider();
 
+// Start API server in background
+var apiCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
+var apiTask = Task.Run(async () =>
+{
+    try
+    {
+        await ApiServer.StartAsync(serviceProvider, apiCts.Token);
+    }
+    catch (OperationCanceledException) { }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]API server error: {Markup.Escape(ex.Message)}[/]");
+    }
+}, apiCts.Token);
+
+// Give Kestrel a moment to bind
+await Task.Delay(300);
+
 var consoleService = serviceProvider.GetRequiredService<IClickConsoleService>();
 await consoleService.RunAsync(cts.Token);
+
+// Console exited — shut down API
+apiCts.Cancel();
+try { await apiTask; } catch { }
 
 // ── Pre-DI workspace selection ─────────────────────────────────────────
 // Must run before the DI container is built because the workspace path

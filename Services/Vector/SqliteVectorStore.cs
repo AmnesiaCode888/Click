@@ -141,7 +141,11 @@ public sealed class SqliteVectorStore : IVectorStore, IDisposable
             results.Add((chunk, score));
         }
 
-        return results.OrderByDescending(r => r.Score).Take(limit).Select(r => r.Chunk).ToList();
+        return results.OrderByDescending(r => r.Score).Take(limit).Select(r =>
+        {
+            r.Chunk.CosineScore = r.Score;
+            return r.Chunk;
+        }).ToList();
     }
 
     public async Task<int> GetChunkCountAsync(CancellationToken cancellationToken = default)

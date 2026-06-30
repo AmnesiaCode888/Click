@@ -49,6 +49,15 @@ public sealed class VectorIndexService
         var stats = await _store.GetStatsAsync(cancellationToken);
         if (stats is { Chunks: > 0 })
         {
+            // Check if model changed — if so, reindex
+            if (!string.IsNullOrEmpty(stats.Model) && stats.Model != _embeddingService.ModelName)
+            {
+                _logger.LogInformation("Model changed from {OldModel} to {NewModel} — reindexing", stats.Model, _embeddingService.ModelName);
+                progress?.Report($"Модель эмбеддинга изменилась ({stats.Model} → {_embeddingService.ModelName}), переиндексация...");
+                await ReindexAsync(progress, cancellationToken);
+                return;
+            }
+
             _logger.LogInformation("Vector index already exists: {Chunks} chunks, {Files} files", stats.Chunks, stats.Files);
             return;
         }
@@ -173,12 +182,28 @@ public sealed class VectorIndexService
             if (storedHash == hash)
                 return;
 
-            await _store.DeleteFileChunksAsync(filePath, cancellationToken);
-
             var chunker = _chunkerFactory.GetChunker(fullPath);
             var chunks = chunker.ChunkFile(filePath, content, hash).ToList();
+
+            // Insert new chunks first, then delete old ones to avoid data loss on failure
+            Exception? insertError = null;
             if (chunks.Count > 0)
-                await EmbedAndInsertAsync(chunks, cancellationToken);
+            {
+                try
+                {
+                    await EmbedAndInsertAsync(chunks, cancellationToken);
+                }
+                catch (Exception ex)
+                {
+                    insertError = ex;
+                }
+            }
+
+            // Delete old chunks regardless of insert success (if insert failed, old chunks remain — safe)
+            await _store.DeleteFileChunksAsync(filePath, cancellationToken);
+
+            if (insertError is not null)
+                throw insertError;
 
             var fi = new FileInfo(fullPath);
             await _store.UpsertFileIndexAsync(filePath, hash, fi.LastWriteTimeUtc.Ticks, chunks.Count, cancellationToken);
@@ -204,9 +229,50 @@ public sealed class VectorIndexService
         if (queryEmbeddings.Length == 0 || queryEmbeddings[0].Length == 0)
             return Array.Empty<SemanticSearchResult>();
 
-        var chunks = await _store.SearchAsync(queryEmbeddings[0], limit, language, glob, cancellationToken);
-        return chunks.Select(c => new SemanticSearchResult(
-            c.FilePath, c.StartLine, c.EndLine, c.SymbolName, c.SymbolType, c.ParentScope, c.Language, c.Content, 0f)).ToList();
+        // Get more candidates than needed for re-ranking
+        var candidateLimit = Math.Max(limit * 3, 20);
+        var chunks = await _store.SearchAsync(queryEmbeddings[0], candidateLimit, language, glob, cancellationToken);
+
+        // Hybrid re-ranking: combine cosine similarity with keyword relevance
+        var queryTerms = Tokenize(query);
+        var results = new List<(SemanticSearchResult Result, float CombinedScore)>();
+
+        foreach (var chunk in chunks)
+        {
+            var keywordScore = queryTerms.Length > 0 ? ComputeKeywordScore(chunk.Content, queryTerms) : 0f;
+            var combinedScore = 0.6f * (chunk.CosineScore > 0 ? chunk.CosineScore : 0.7f) + 0.4f * keywordScore;
+            results.Add((new SemanticSearchResult(
+                chunk.FilePath, chunk.StartLine, chunk.EndLine,
+                chunk.SymbolName, chunk.SymbolType, chunk.ParentScope,
+                chunk.Language, chunk.Content, combinedScore), combinedScore));
+        }
+
+        return results
+            .OrderByDescending(r => r.CombinedScore)
+            .Take(limit)
+            .Select(r => r.Result)
+            .ToList();
+    }
+
+    private static string[] Tokenize(string text)
+    {
+        return text.ToLowerInvariant()
+            .Split([' ', '\t', '\n', '\r', '.', ',', ':', ';', '(', ')', '[', ']', '{', '}', '<', '>', '/', '\\', '_', '-', '+', '=', '*', '&', '|', '!', '?', '"', '\''])
+            .Where(w => w.Length >= 2)
+            .Distinct()
+            .ToArray();
+    }
+
+    private static float ComputeKeywordScore(string content, string[] queryTerms)
+    {
+        var contentLower = content.ToLowerInvariant();
+        int matches = 0;
+        foreach (var term in queryTerms)
+        {
+            if (contentLower.Contains(term))
+                matches++;
+        }
+        return queryTerms.Length > 0 ? (float)matches / queryTerms.Length : 0f;
     }
 
     public Task<IndexStats?> GetStatsAsync(CancellationToken cancellationToken = default)
@@ -216,7 +282,23 @@ public sealed class VectorIndexService
     {
         if (chunks.Count == 0) return;
 
-        var texts = chunks.Select(c => FormatChunkText(c)).ToList();
+        const int maxChunkChars = 7000;
+        int truncatedCount = 0;
+
+        var texts = chunks.Select(c =>
+        {
+            var text = FormatChunkText(c);
+            if (text.Length > maxChunkChars)
+            {
+                text = text[..maxChunkChars];
+                truncatedCount++;
+            }
+            return text;
+        }).ToList();
+
+        if (truncatedCount > 0)
+            _logger.LogWarning("Truncated {Count}/{Total} chunk texts to {Max} chars to stay under embedding API token limit", truncatedCount, chunks.Count, maxChunkChars);
+
         var embeddings = await _embeddingService.GetEmbeddingsAsync(texts, cancellationToken);
 
         int skipped = 0;
@@ -230,7 +312,7 @@ public sealed class VectorIndexService
         }
 
         if (skipped > 0)
-            _logger.LogWarning("Skipped {Skipped}/{Total} chunks due to missing embedding — API returned fewer vectors than text inputs. Try reducing batch size or check the embedding model.", skipped, chunks.Count);
+            _logger.LogWarning("Skipped {Skipped}/{Total} chunks due to missing embedding", skipped, chunks.Count);
 
         if (enriched.Count > 0)
             await _store.InsertChunksAsync(enriched, cancellationToken);
@@ -284,36 +366,161 @@ public sealed class VectorIndexService
 
     private List<string> LoadGitignore()
     {
-        var patterns = new List<string> { ".git", "node_modules", "bin", "obj", "dist", "build", "target", ".click" };
+        var builtIn = new List<string> { ".git", "node_modules", "bin", "obj", "dist", "build", "target", ".click" };
         var gitignorePath = Path.Combine(_workspacePath, ".gitignore");
-        if (File.Exists(gitignorePath))
+        if (!File.Exists(gitignorePath))
+            return builtIn;
+
+        var result = new List<string>();
+        foreach (var line in File.ReadAllLines(gitignorePath))
         {
-            foreach (var line in File.ReadAllLines(gitignorePath))
-            {
-                var trimmed = line.Trim();
-                if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#')) continue;
-                patterns.Add(trimmed.TrimStart('/', '\\'));
-            }
+            var trimmed = line.Trim();
+            if (string.IsNullOrEmpty(trimmed) || trimmed.StartsWith('#')) continue;
+            // Normalize: strip leading / or \ and trailing spaces
+            var normalized = trimmed.TrimStart('/', '\\').TrimEnd();
+            result.Add(normalized);
         }
-        return patterns;
+        // Built-in patterns always apply
+        result.AddRange(builtIn);
+        return result;
     }
 
     private static bool IsIgnored(string relativePath, List<string> patterns)
     {
-        var segments = relativePath.Split('/');
-        foreach (var pattern in patterns)
+        // Apply negation (!) patterns first — track if file is explicitly un-ignored
+        bool explicitlyAllowed = false;
+
+        foreach (var rawPattern in patterns)
         {
-            var p = pattern.TrimEnd('/');
-            // Exact segment match or starts-with directory match
-            if (segments.Contains(p, StringComparer.OrdinalIgnoreCase))
-                return true;
-            if (relativePath.StartsWith(p + "/", StringComparison.OrdinalIgnoreCase))
-                return true;
-            // Simple glob: *.ext
-            if (p.StartsWith("*.") && relativePath.EndsWith(p[1..], StringComparison.OrdinalIgnoreCase))
+            bool negate = rawPattern.StartsWith('!');
+            string p = negate ? rawPattern[1..].TrimStart('/', '\\') : rawPattern;
+            bool dirOnly = p.EndsWith('/');
+
+            string pattern = dirOnly ? p.TrimEnd('/') : p;
+            bool match = MatchGlob(relativePath, pattern);
+
+            // dirOnly: only match if relativePath represents a directory (ends with /)
+            if (dirOnly && !relativePath.EndsWith('/'))
+                match = false;
+
+            if (negate)
+            {
+                if (match) explicitlyAllowed = true;
+            }
+            else
+            {
+                if (match) return !explicitlyAllowed;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool MatchGlob(string relativePath, string pattern)
+    {
+        var pathSep = '/';
+
+        // Exact match (segment or full path)
+        if (string.Equals(relativePath, pattern, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // Starts-with directory match: e.g. pattern "build" matches "build/file.cs"
+        if (relativePath.StartsWith(pattern + "/", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // Pattern like "*.ext"
+        if (pattern.StartsWith("*.") && !pattern.Contains('/') && !pattern[2..].Contains('*'))
+        {
+            if (relativePath.EndsWith(pattern[1..], StringComparison.OrdinalIgnoreCase))
                 return true;
         }
+
+        // Pattern with ** (match any number of directories)
+        if (pattern.Contains("**"))
+        {
+            var parts = pattern.Split(new[] { "**" }, StringSplitOptions.None);
+            if (parts.Length == 2)
+            {
+                var prefix = parts[0].TrimEnd('/');
+                var suffix = parts[1].TrimStart('/');
+                // ** at start: match suffix anywhere
+                if (string.IsNullOrEmpty(prefix))
+                {
+                    if (string.IsNullOrEmpty(suffix))
+                        return true;
+                    if (relativePath.EndsWith("/" + suffix, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                    if (relativePath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                else
+                {
+                    // prefix/**/suffix
+                    if (relativePath.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase) &&
+                        relativePath.EndsWith("/" + suffix, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            // pattern/** or pattern/**/
+            if (parts.Length == 2 && string.IsNullOrEmpty(parts[1]))
+            {
+                var prefix = parts[0].TrimEnd('/');
+                if (relativePath.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(relativePath, prefix, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        // Simple wildcard * (matches within a single path segment)
+        if (pattern.Contains('*') && !pattern.Contains("**"))
+        {
+            if (SimpleWildcardMatch(relativePath, pattern, pathSep))
+                return true;
+        }
+
+        // Check each path segment for pattern match
+        var segments = relativePath.Split(pathSep);
+        foreach (var seg in segments)
+        {
+            if (string.Equals(seg, pattern, StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (pattern.StartsWith("*.") && seg.EndsWith(pattern[1..], StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (SimpleWildcardMatch(seg, pattern, pathSep))
+                return true;
+        }
+
         return false;
+    }
+
+    private static bool SimpleWildcardMatch(string text, string pattern, char sep)
+    {
+        int ti = 0, pi = 0;
+        while (pi < pattern.Length && ti < text.Length)
+        {
+            if (pattern[pi] == '*')
+            {
+                // Skip consecutive '*' wildcards
+                while (pi < pattern.Length && pattern[pi] == '*') pi++;
+                if (pi >= pattern.Length) return true; // trailing * matches everything
+                // Find remaining pattern in text
+                char nextChar = pattern[pi];
+                while (ti < text.Length && text[ti] != nextChar) ti++;
+                if (ti >= text.Length) return false;
+            }
+            else if (pattern[pi] == '?' || pattern[pi] == text[ti])
+            {
+                pi++;
+                ti++;
+            }
+            else
+            {
+                return false;
+            }
+        }
+        // Skip remaining trailing '*'
+        while (pi < pattern.Length && pattern[pi] == '*') pi++;
+        return pi >= pattern.Length && ti >= text.Length;
     }
 
     private static string ComputeHash(string content)

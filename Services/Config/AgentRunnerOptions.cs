@@ -4,8 +4,8 @@ public class AgentRunnerOptions
 {
     public const string SectionName = "Agent";
 
-    public int MaxIterations { get; set; } = 15;
-    public int MaxToolResultCharsKeep { get; set; } = 2500;
-    public int MaxToolResultCharsSuccess { get; set; } = 400;
-    public int PreserveRecentToolRounds { get; set; } = 2;
+    public int MaxIterations { get; set; } = 50;
+    public int MaxToolResultCharsKeep { get; set; } = 8000;
+    public int MaxToolResultCharsSuccess { get; set; } = 2000;
+    public int PreserveRecentToolRounds { get; set; } = 4;
 }

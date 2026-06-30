@@ -76,19 +76,19 @@ public static class ServiceCollectionExtensions
         });
 
         services.AddSingleton<SubAgentToolHandler>();
+        services.AddSingleton<ConversationHistoryProvider>();
 
-<<<<<<< Updated upstream
-=======
         // --- Embedding / Vector search (conditional on config) ---
         var embedOptions = configuration.GetSection(EmbeddingOptions.SectionName).Get<EmbeddingOptions>() ?? new EmbeddingOptions();
         services.AddSingleton(embedOptions);
 
         if (embedOptions.IsConfigured)
         {
-            services.AddHttpClient<OpenAiEmbeddingService>().ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(60));
+            services.AddHttpClient(nameof(OpenAiEmbeddingService)).ConfigureHttpClient(c => c.Timeout = TimeSpan.FromSeconds(60));
             services.AddSingleton<IEmbeddingService>(sp =>
             {
-                var http = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(OpenAiEmbeddingService));
+                var factory = sp.GetRequiredService<IHttpClientFactory>();
+                var http = factory.CreateClient(nameof(OpenAiEmbeddingService));
                 return new OpenAiEmbeddingService(http, embedOptions);
             });
         }
@@ -118,10 +118,9 @@ public static class ServiceCollectionExtensions
         {
             var indexService = sp.GetRequiredService<VectorIndexService>();
             var logger = sp.GetRequiredService<ILogger<SemanticSearchToolHandler>>();
-            return new SemanticSearchToolHandler(indexService, logger);
+            var workspaceOptions = sp.GetRequiredService<ClickWorkspaceOptions>();
+            return new SemanticSearchToolHandler(indexService, logger, workspaceOptions.GetResolvedBasePath());
         });
-
->>>>>>> Stashed changes
         var agentTypes = Assembly.GetExecutingAssembly()
             .GetTypes()
             .Where(t => typeof(IAgent).IsAssignableFrom(t)

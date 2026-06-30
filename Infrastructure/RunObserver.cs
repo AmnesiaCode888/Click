@@ -1,5 +1,6 @@
 using AgentSharp;
 using Spectre.Console;
+using System.Text;
 
 namespace Click.Infrastructure;
 
@@ -13,6 +14,8 @@ namespace Click.Infrastructure;
 ///     ● Исследование
 ///     │ Прочитало Infrastructure/AgentRunner.cs — ...
 ///     │ Поиск по маске "**/*.cs" — 23 совпадения
+///     ● Говорит
+///     │ Попробую ещё запрос по коду...
 ///     ● Думает
 ///     │ Нужно проверить FileToolHandler.cs, чтобы понять как работает read...
 ///     ● Действие
@@ -31,10 +34,12 @@ public sealed class RunObserver : IProgress<AgentRunnerProgress>
     private readonly object _lock = new();
     private string? _currentPhase;
     private bool _isFirstPhase = true;
+    private readonly StringBuilder _streamingBuffer = new();
 
     private const string PhaseResearch = "Исследование";
     private const string PhaseAction = "Действие";
     private const string PhaseThinking = "Думает";
+    private const string PhaseSpeaking = "Говорит";
 
     /// <summary>
     /// Both the phase bullet (●) and the sub-item bar (│) start at this
@@ -53,18 +58,29 @@ public sealed class RunObserver : IProgress<AgentRunnerProgress>
             //    print a friendly Russian-localised sub-line.
             if (value.FormattedEntry != null)
             {
+                FlushStreamingBuffer();
                 var phase = ClassifyPhase(value.Tool, value.FormattedEntry);
                 if (phase != _currentPhase) OpenPhase(phase);
                 AnsiConsole.MarkupLine(SubLine(value.FormattedEntry, value.Status == "error"));
                 return;
             }
 
-            // 2) LLM reasoning: always the "Думает" phase. Distinct voice
+            // 2) Streaming content: buffer so it renders as a proper sub-item
+            //    under "● Говорит" rather than raw inline text bleeding into
+            //    the timeline.
+            if (!string.IsNullOrEmpty(value.StreamingContent))
+            {
+                _streamingBuffer.Append(value.StreamingContent);
+                return;
+            }
+
+            // 3) LLM reasoning: always the "Думает" phase. Distinct voice
             //    (italic dim cyan — same family as Исследование per user
             //    request but stylistically italic-dimmed to skip apart from
             //    the regular grey sub-items).
             if (!string.IsNullOrEmpty(value.Reasoning))
             {
+                FlushStreamingBuffer();
                 if (_currentPhase != PhaseThinking) OpenPhase(PhaseThinking);
                 var collapsed = CollapseTrim(value.Reasoning, 320);
                 AnsiConsole.MarkupLine($"{Gutter}│ [dim italic cyan]{Markup.Escape(collapsed)}[/]");
@@ -84,6 +100,20 @@ public sealed class RunObserver : IProgress<AgentRunnerProgress>
         AnsiConsole.MarkupLine(PhaseHeader(phase));
         _currentPhase = phase;
         _isFirstPhase = false;
+    }
+
+    /// <summary>
+    /// Flush buffered streaming content as a sub-item under "● Говорит".
+    /// Called before a phase switch so the spoken text stays grouped under its
+    /// own header instead of bleeding between phases.
+    /// </summary>
+    private void FlushStreamingBuffer()
+    {
+        if (_streamingBuffer.Length == 0) return;
+        if (_currentPhase != PhaseSpeaking) OpenPhase(PhaseSpeaking);
+        var text = CollapseTrim(_streamingBuffer.ToString(), 500);
+        AnsiConsole.MarkupLine($"{Gutter}│ [cyan]{Markup.Escape(text)}[/]");
+        _streamingBuffer.Clear();
     }
 
     /// <summary>

@@ -13,7 +13,8 @@ public interface IChatService
         IReadOnlyList<ApiMessage> messages,
         IReadOnlyList<ApiTool>? tools = null,
         string? model = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        IProgress<string>? contentStream = null);
 
     Task<string[]> GetAvailableModelsAsync(CancellationToken cancellationToken = default);
 

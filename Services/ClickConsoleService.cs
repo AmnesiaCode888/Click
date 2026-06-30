@@ -18,11 +18,8 @@ public class ClickConsoleService : IClickConsoleService
     private readonly IAgentRegistry _registry;
     private readonly IAgentRunner _runner;
     private readonly IChatService _chatService;
-<<<<<<< Updated upstream
-=======
     private readonly VectorIndexService _vectorIndex;
     private readonly EmbeddingOptions _embeddingOptions;
->>>>>>> Stashed changes
     private readonly OpenAiOptions _aiOptions;
     private readonly ClickChatOptions _chatOptions;
     private readonly ClickWorkspaceOptions _workspaceOptions;
@@ -35,11 +32,8 @@ public class ClickConsoleService : IClickConsoleService
         IAgentRegistry registry,
         IAgentRunner runner,
         IChatService chatService,
-<<<<<<< Updated upstream
-=======
         VectorIndexService vectorIndex,
         EmbeddingOptions embeddingOptions,
->>>>>>> Stashed changes
         OpenAiOptions aiOptions,
         ClickChatOptions chatOptions,
         ClickWorkspaceOptions workspaceOptions)
@@ -47,11 +41,8 @@ public class ClickConsoleService : IClickConsoleService
         _registry = registry;
         _runner = runner;
         _chatService = chatService;
-<<<<<<< Updated upstream
-=======
         _vectorIndex = vectorIndex;
         _embeddingOptions = embeddingOptions;
->>>>>>> Stashed changes
         _aiOptions = aiOptions;
         _chatOptions = chatOptions;
         _workspaceOptions = workspaceOptions;
@@ -77,12 +68,6 @@ public class ClickConsoleService : IClickConsoleService
             WorkspaceDescription: workspaceDescription);
         var context = new AgentContext(workspacePath, metadata);
 
-<<<<<<< Updated upstream
-        AnsiConsole.MarkupLine("[bold cyan]Click[/] — AI-ассистент для разработки");
-        AnsiConsole.MarkupLine($"[dim]Модель: {_aiOptions.Model} | Директория: {workspacePath}[/]");
-        AnsiConsole.MarkupLine($"[dim]{Markup.Escape("/mode [code|question|security] → смена режима | /help → команды")}[/]\n");
-
-=======
         // Auto-index on startup (only if embedding is configured)
         if (_vectorIndex.IsAvailable)
             await EnsureIndexedAsync(cancellationToken);
@@ -90,20 +75,14 @@ public class ClickConsoleService : IClickConsoleService
         AnsiConsole.MarkupLine("[bold cyan]Click[/] — AI-ассистент для разработки");
         AnsiConsole.MarkupLine($"[dim]Модель: {_aiOptions.Model} | Директория: {workspacePath}[/]");
         AnsiConsole.MarkupLine($"[dim]{Markup.Escape("/mode [code|question|security] → смена режима | /help → команды")}[/]\n");
-
->>>>>>> Stashed changes
         var knownCommands = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "/exit", "/quit", "/q",
             "/clear",
             "/models", "/config",
             "/security-review", "/s-r",
-<<<<<<< Updated upstream
-            "/mode", "/m"
-=======
             "/mode", "/m",
             "/index", "/index-status", "/index-reset", "/search"
->>>>>>> Stashed changes
         };
 
         // Per-mode history so switching modes doesn't mix contexts
@@ -173,11 +152,7 @@ public class ClickConsoleService : IClickConsoleService
                 || input.Equals("/s-r", StringComparison.OrdinalIgnoreCase))
             {
                 var securityAgent = _registry.GetAgent("security");
-<<<<<<< Updated upstream
-                var securityHistory = new List<ChatMessage>();
-=======
                 var securityHistory = histories[AgentMode.Security];
->>>>>>> Stashed changes
                 await ProcessInputAsync(securityAgent, context, "Проведи security review всего workspace", securityHistory, cancellationToken);
                 continue;
             }
@@ -190,8 +165,6 @@ public class ClickConsoleService : IClickConsoleService
                 continue;
             }
 
-<<<<<<< Updated upstream
-=======
             if (input.Equals("/index", StringComparison.OrdinalIgnoreCase))
             {
                 await RunIndexCommandAsync(cancellationToken);
@@ -218,7 +191,6 @@ public class ClickConsoleService : IClickConsoleService
                 continue;
             }
 
->>>>>>> Stashed changes
             try
             {
                 var (agent, history) = ResolveAgentAndHistory(context, histories);
@@ -322,24 +294,6 @@ public class ClickConsoleService : IClickConsoleService
         if (string.IsNullOrWhiteSpace(model))
             warnings.Add("Модель не указана.");
 
-<<<<<<< Updated upstream
-        if (warnings.Count > 0)
-        {
-            AnsiConsole.WriteLine();
-            var panel = new Panel(
-                string.Join("\n", warnings.Select(w => $"[yellow]  ⚠ {Markup.Escape(w)}[/]")) +
-                "\n\n[dim]Используйте /config для интерактивной настройки[/]")
-            {
-                Header = new PanelHeader(" Внимание "),
-                Border = BoxBorder.Rounded,
-                BorderStyle = new Style(Color.Yellow),
-                Padding = new Padding(1, 1, 1, 1)
-            };
-            AnsiConsole.Write(panel);
-            AnsiConsole.WriteLine();
-        }
-
-=======
         if (!_embeddingOptions.IsConfigured && !isLocal)
             warnings.Add("Embedding не настроен. Векторный поиск не работает. Используйте /config → Настроить Embedding.");
 
@@ -359,7 +313,6 @@ public class ClickConsoleService : IClickConsoleService
             AnsiConsole.WriteLine();
         }
 
->>>>>>> Stashed changes
         return true;
     }
 
@@ -518,13 +471,10 @@ public class ClickConsoleService : IClickConsoleService
             var maskedKey = MaskApiKey(apiKey);
             var resolvedBaseUrl = ResolveEffectiveBaseUrl();
 
-<<<<<<< Updated upstream
-=======
             var embedStatus = _embeddingOptions.IsConfigured
                 ? $"[green]✓[/] {Markup.Escape(_embeddingOptions.Model!)}"
                 : "[red]✗ не настроен[/]";
 
->>>>>>> Stashed changes
             AnsiConsole.WriteLine();
             var panel = new Panel(
                 $"[bold cyan]Model:[/]            [green]{Markup.Escape(_aiOptions.Model)}[/]\n" +
@@ -532,11 +482,8 @@ public class ClickConsoleService : IClickConsoleService
                 $"[bold cyan]ApiKey:[/]           {(string.IsNullOrWhiteSpace(apiKey) ? "[red](не задан)[/]" : $"[dim]{maskedKey}[/]")}\n" +
                 $"[bold cyan]MaxTokens:[/]        {_aiOptions.MaxTokens}\n" +
                 $"[bold cyan]Timeout:[/]          {_aiOptions.RequestTimeoutSeconds} сек\n" +
-<<<<<<< Updated upstream
-=======
                 $"[dim]──────────────────────────────────[/]\n" +
                 $"[bold cyan]Embedding:[/]         {embedStatus}\n" +
->>>>>>> Stashed changes
                 $"[dim](настраивается интерактивно или в appsettings.json)[/]")
             {
                 Header = new PanelHeader(" Конфигурация "),
@@ -558,10 +505,7 @@ public class ClickConsoleService : IClickConsoleService
                         "Пресет: Ollama (локально)",
                         "Пресет: LM Studio (локально)",
                         "Пресет: OpenRouter",
-<<<<<<< Updated upstream
-=======
                         "Настроить Embedding (векторный поиск)",
->>>>>>> Stashed changes
                         "Назад"
                     }));
 
@@ -616,13 +560,10 @@ public class ClickConsoleService : IClickConsoleService
                     await ShowModelsAsync();
                     return;
 
-<<<<<<< Updated upstream
-=======
                 case "Настроить Embedding (векторный поиск)":
                     await ShowEmbeddingConfigAsync();
                     break;
 
->>>>>>> Stashed changes
                 case "Назад":
                     return;
             }
@@ -700,11 +641,9 @@ public class ClickConsoleService : IClickConsoleService
         return key[..4] + new string('*', key.Length - 8) + key[^4..];
     }
 
-<<<<<<< Updated upstream
-=======
     private async Task ShowEmbeddingConfigAsync()
     {
-        await Task.CompletedTask; // keep async for consistency
+        await Task.CompletedTask;
 
         while (true)
         {
@@ -869,9 +808,16 @@ public class ClickConsoleService : IClickConsoleService
             AnsiConsole.WriteLine();
             AnsiConsole.MarkupLine("[green]✓ Индексация завершена[/]\n");
         }
+        catch (OperationCanceledException)
+        {
+            AnsiConsole.MarkupLine("[yellow]Индексация прервана.[/]\n");
+        }
         catch (Exception ex)
         {
-            AnsiConsole.MarkupLine($"[yellow]⚠ Ошибка индексации: {Markup.Escape(ex.Message)}[/]\n");
+            var msg = ex.Message;
+            if (msg.Length > 200) msg = msg[..197] + "...";
+            AnsiConsole.MarkupLine($"[yellow]⚠ Ошибка индексации: {Markup.Escape(msg)}[/]");
+            AnsiConsole.MarkupLine("[dim]Индексацию можно запустить повторно командой /index[/]\n");
         }
     }
 
@@ -947,7 +893,6 @@ public class ClickConsoleService : IClickConsoleService
         }
     }
 
->>>>>>> Stashed changes
     private static void ShowHelp()
     {
         AnsiConsole.WriteLine();
@@ -958,13 +903,10 @@ public class ClickConsoleService : IClickConsoleService
             "[bold yellow]/config[/]               Настроить API (интерактивно)\n" +
             "[bold yellow]/mode " + Markup.Escape("[code|question|security]") + "[/]  Переключить режим\n" +
             "[bold yellow]/security-review, /s-r[/] Запустить security review (read-only)\n" +
-<<<<<<< Updated upstream
-=======
             "[bold yellow]/index[/]                Переиндексировать проект\n" +
             "[bold yellow]/index-status[/]          Статистика индекса\n" +
             "[bold yellow]/index-reset[/]           Удалить и переиндексировать\n" +
             "[bold yellow]/search <query>[/]        Семантический поиск (без LLM)\n" +
->>>>>>> Stashed changes
             "[bold yellow]/help, /h, /?[/]          Показать это меню")
         {
             Header = new PanelHeader(" Доступные команды "),

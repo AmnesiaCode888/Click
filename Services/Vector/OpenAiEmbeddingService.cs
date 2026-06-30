@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Linq;
 
 namespace Click.Services.Vector;
 
@@ -17,6 +18,7 @@ public sealed class OpenAiEmbeddingService : IEmbeddingService
 
     public bool IsAvailable => true;
     public int Dimensions => _options.Dimensions > 0 ? _options.Dimensions : 768;
+    public string ModelName => _options.Model ?? "unknown";
 
     public OpenAiEmbeddingService(HttpClient httpClient, EmbeddingOptions options)
     {
@@ -29,19 +31,78 @@ public sealed class OpenAiEmbeddingService : IEmbeddingService
         if (texts.Count == 0)
             return Array.Empty<float[]>();
 
-        // Gemini/OpenRouter может не поддерживать пакетную эмбеддинг, отправляем по одному
-        const int batchSize = 1;
+        const int batchSize = 20;
         var allResults = new float[texts.Count][];
 
-        for (int batchStart = 0; batchStart < texts.Count; batchStart += batchSize)
+        for (int offset = 0; offset < texts.Count; offset += batchSize)
         {
-            var batch = texts.Skip(batchStart).Take(batchSize).ToList();
-            var batchResult = await GetBatchAsync(batch, cancellationToken);
-            for (int i = 0; i < batchResult.Length; i++)
-                allResults[batchStart + i] = batchResult[i];
+            var batch = texts.Skip(offset).Take(batchSize).ToList();
+            float[][] batchResult;
+
+            try
+            {
+                batchResult = await GetBatchWithRetryAsync(batch, cancellationToken);
+            }
+            catch (Exception) when (batch.Count > 1)
+            {
+                // Some providers don't support batched embeddings — fallback to one-by-one
+                batchResult = new float[batch.Count][];
+                for (int i = 0; i < batch.Count; i++)
+                {
+                    try
+                    {
+                        var single = await GetBatchWithRetryAsync(new List<string> { batch[i] }, cancellationToken);
+                        batchResult[i] = single[0];
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException($"Embedding failed for text index {offset + i}", ex);
+                    }
+                }
+            }
+
+            for (int i = 0; i < batch.Count && offset + i < allResults.Length; i++)
+                allResults[offset + i] = batchResult[i];
         }
 
         return allResults;
+    }
+
+    private async Task<float[][]> GetBatchWithRetryAsync(List<string> texts, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 3;
+        Exception? lastEx = null;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                return await GetBatchAsync(texts, cancellationToken);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && attempt < maxAttempts)
+            {
+                lastEx = new TimeoutException("Embedding request timed out");
+                await Task.Delay(ComputeRetryDelay(attempt), cancellationToken);
+            }
+            catch (HttpRequestException) when (attempt < maxAttempts)
+            {
+                await Task.Delay(ComputeRetryDelay(attempt), cancellationToken);
+            }
+            catch (InvalidOperationException) when (attempt < maxAttempts)
+            {
+                await Task.Delay(ComputeRetryDelay(attempt), cancellationToken);
+            }
+        }
+
+        throw lastEx ?? new InvalidOperationException("Embedding API request failed after retries");
+    }
+
+    private static TimeSpan ComputeRetryDelay(int attempt)
+    {
+        var jitter = 0.5 + Random.Shared.NextDouble() * 0.5;
+        var delayMs = 2000 * (int)Math.Pow(2, attempt - 1);
+        return TimeSpan.FromMilliseconds(delayMs * jitter);
     }
 
     private async Task<float[][]> GetBatchAsync(List<string> texts, CancellationToken cancellationToken)

@@ -1,11 +1,14 @@
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using AgentSharp;
 
 namespace Click.Infrastructure;
 
 public static class PromptLoader
 {
+    private static readonly Regex TemplateRegex = new(@"\{\{(\w+)\}\}", RegexOptions.Compiled);
+
     public static string Load(string resourcePath, AgentContext context)
     {
         var assembly = Assembly.GetExecutingAssembly();
@@ -17,10 +20,19 @@ public static class PromptLoader
         using var reader = new StreamReader(stream, Encoding.UTF8);
         var prompt = reader.ReadToEnd();
 
-        return prompt
-            .Replace("{{WorkspacePath}}", context.WorkspacePath)
-            .Replace("{{CurrentDateTime}}", context.Metadata.CurrentDateTime)
-            .Replace("{{OperatingSystem}}", context.Metadata.OperatingSystem)
-            .Replace("{{WorkspaceDescription}}", context.Metadata.WorkspaceDescription ?? "(описание проекта недоступно — запустите /clear для обновления)");
+        return TemplateRegex.Replace(prompt, match =>
+        {
+            var key = match.Groups[1].Value;
+            var value = key switch
+            {
+                "WorkspacePath" => context.WorkspacePath,
+                "CurrentDateTime" => context.Metadata.CurrentDateTime,
+                "OperatingSystem" => context.Metadata.OperatingSystem,
+                "WorkspaceDescription" => context.Metadata.WorkspaceDescription ?? "(описание проекта недоступно — запустите /clear для обновления)",
+                _ => match.Value
+            };
+            // Escape curly braces in values to prevent format corruption
+            return value.Replace("{", "{{").Replace("}", "}}");
+        });
     }
 }

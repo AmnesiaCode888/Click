@@ -8,6 +8,7 @@ public sealed class NoOpEmbeddingService : IEmbeddingService
 {
     public bool IsAvailable => false;
     public int Dimensions => 0;
+    public string ModelName => "none";
 
     public Task<float[][]> GetEmbeddingsAsync(IReadOnlyList<string> texts, CancellationToken cancellationToken = default)
     {

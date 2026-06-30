@@ -12,6 +12,7 @@ public class AgentRunner : IAgentRunner
     private readonly IChatService _chatService;
     private readonly ILogger<AgentRunner> _logger;
     private readonly AgentRunnerOptions _options;
+    private readonly ConversationHistoryProvider _conversationHistory;
 
     private static readonly Regex InternalTokensRegex = new(
         @"<\|[^|]+\|>|\[INST\]|\[/INST\]| to=functions\.\w+\b",
@@ -25,11 +26,13 @@ public class AgentRunner : IAgentRunner
     public AgentRunner(
         IChatService chatService,
         ILogger<AgentRunner> logger,
-        IOptions<AgentRunnerOptions> options)
+        IOptions<AgentRunnerOptions> options,
+        ConversationHistoryProvider conversationHistory)
     {
         _chatService = chatService;
         _logger = logger;
         _options = options.Value;
+        _conversationHistory = conversationHistory;
     }
 
     public async Task<AgentRunnerResult> RunAsync(
@@ -63,7 +66,9 @@ public class AgentRunner : IAgentRunner
             CompactMessages(messages);
 
             progress?.Report(new AgentRunnerProgress(Title: "Ожидаю ответ LLM...", Step: iteration, Status: "thinking"));
-            var response = await _chatService.ChatWithMessagesAsync(messages, tools, model, cancellationToken);
+            var contentStream = progress != null ? new ContentStreamProgress(progress) : null;
+            var response = await _chatService.ChatWithMessagesAsync(messages, tools, model, cancellationToken, contentStream);
+            contentStream?.Flush();
             lastResponse = response;
             totalUsage = AddUsage(totalUsage, response.Usage);
 
@@ -146,6 +151,35 @@ public class AgentRunner : IAgentRunner
             response.ReasoningContent);
     }
 
+    private sealed class ContentStreamProgress : IProgress<string>
+    {
+        private readonly IProgress<AgentRunnerProgress> _inner;
+        private readonly StringBuilder _buffer = new();
+        private static readonly char[] Delimiters = [' ', '\n', '.', ',', '!', '?', ':', ';'];
+
+        public ContentStreamProgress(IProgress<AgentRunnerProgress> inner) => _inner = inner;
+
+        public void Report(string value)
+        {
+            _buffer.Append(value);
+            if (_buffer.Length >= 8 || value.IndexOfAny(Delimiters) >= 0)
+            {
+                _inner.Report(new AgentRunnerProgress(StreamingContent: _buffer.ToString()));
+                _buffer.Clear();
+            }
+        }
+
+        /// <summary>Must be called when streaming ends to flush any remaining buffer.</summary>
+        public void Flush()
+        {
+            if (_buffer.Length > 0)
+            {
+                _inner.Report(new AgentRunnerProgress(StreamingContent: _buffer.ToString()));
+                _buffer.Clear();
+            }
+        }
+    }
+
     private static void AppendAssistantTurn(List<ApiMessage> messages, AgentChatResponse response)
     {
         messages.Add(new ApiMessage("assistant",
@@ -157,6 +191,10 @@ public class AgentRunner : IAgentRunner
     private async Task ExecuteToolCallsAsync(IAgent agent, AgentChatResponse response, List<ApiMessage> messages,
         List<string> toolLog, IProgress<AgentRunnerProgress>? progress, int iteration, CancellationToken cancellationToken)
     {
+        // Build recent context summary for sub-agents
+        var recentContext = BuildRecentContext(messages, toolLog);
+        _conversationHistory.RecentContext = recentContext;
+
         var executed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var tc in response.ToolCalls)
         {
@@ -372,8 +410,50 @@ public class AgentRunner : IAgentRunner
         var handler = agent.GetHandler(name);
         if (handler == null)
             return $"Неизвестный тул: {name}";
-        var result = await handler.ExecuteAsync(argumentsJson, ct);
-        return result.FormattedContent;
+
+        // Global tool timeout: 120 seconds for any tool (individual tools may have tighter limits)
+        using var toolCts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(toolCts.Token, ct);
+
+        try
+        {
+            var result = await handler.ExecuteAsync(argumentsJson, linkedCts.Token);
+            return result.FormattedContent;
+        }
+        catch (OperationCanceledException) when (toolCts.IsCancellationRequested)
+        {
+            return $"Ошибка: инструмент '{name}' превысил таймаут 120 секунд и был прерван.";
+        }
+    }
+
+    private static string BuildRecentContext(List<ApiMessage> messages, List<string> toolLog)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("[Контекст родительского агента: что уже было сделано]");
+
+        // Show last 5 tool log entries
+        var recentLog = toolLog.Count > 5
+            ? toolLog.Skip(toolLog.Count - 5)
+            : toolLog;
+        foreach (var entry in recentLog)
+        {
+            var truncated = entry.Length > 200 ? entry[..197] + "..." : entry;
+            sb.AppendLine($"  • {truncated}");
+        }
+
+        // Show the last user message for intent context
+        for (int i = messages.Count - 1; i >= 0; i--)
+        {
+            if (messages[i].Role == "user")
+            {
+                var userMsg = messages[i].Content ?? "";
+                if (userMsg.Length > 300) userMsg = userMsg[..297] + "...";
+                sb.AppendLine($"\nЗадача пользователя: {userMsg}");
+                break;
+            }
+        }
+
+        return sb.ToString();
     }
 
     private static string Truncate(string s, int max)

@@ -17,7 +17,7 @@ public sealed class FallbackChunker : ICodeChunker
         // For small files — whole file as one chunk
         if (lines.Length <= WindowSize)
         {
-            var id = ChunkUtils.ComputeChunkId(filePath, content);
+            var id = ChunkUtils.ComputeChunkId(filePath, content, 1, lines.Length);
             chunks.Add(new CodeChunk(id, filePath, lang, null, "file", null, 1, lines.Length, content.Trim(), fileHash, Array.Empty<float>()));
             return chunks;
         }
@@ -38,7 +38,7 @@ public sealed class FallbackChunker : ICodeChunker
             var windowContent = string.Join("\n", windowLines).Trim();
             if (string.IsNullOrWhiteSpace(windowContent)) continue;
 
-            var id = ChunkUtils.ComputeChunkId(filePath, windowContent);
+            var id = ChunkUtils.ComputeChunkId(filePath, windowContent, start + 1, end);
             chunks.Add(new CodeChunk(id, filePath, lang, null, "section", null, start + 1, end, windowContent, fileHash, Array.Empty<float>()));
         }
 
@@ -61,7 +61,7 @@ public sealed class FallbackChunker : ICodeChunker
                 if (startLine != null && blockLines.Count > 0)
                 {
                     var content = string.Join("\n", blockLines).Trim();
-                    var id = ChunkUtils.ComputeChunkId(filePath, content);
+                    var id = ChunkUtils.ComputeChunkId(filePath, content, startLine.Value, i);
                     var header = blockLines[0].Trim().TrimStart('#', ' ');
                     chunks.Add(new CodeChunk(id, filePath, lang, header, "section", null, startLine.Value, i, content, fileHash, Array.Empty<float>()));
                 }
@@ -75,7 +75,7 @@ public sealed class FallbackChunker : ICodeChunker
         if (startLine != null && blockLines.Count > 0)
         {
             var content = string.Join("\n", blockLines).Trim();
-            var id = ChunkUtils.ComputeChunkId(filePath, content);
+            var id = ChunkUtils.ComputeChunkId(filePath, content, startLine.Value, lines.Length);
             var header = blockLines[0].Trim().TrimStart('#', ' ');
             chunks.Add(new CodeChunk(id, filePath, lang, header, "section", null, startLine.Value, lines.Length, content, fileHash, Array.Empty<float>()));
         }

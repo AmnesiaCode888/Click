@@ -12,10 +12,7 @@ public class CodeAssistantAgent : AgentBase
         WebReadToolHandler webRead,
         SearchToolHandler search,
         SubAgentToolHandler subAgent,
-<<<<<<< Updated upstream
-=======
         SemanticSearchToolHandler semanticSearch,
->>>>>>> Stashed changes
         SerperOptions serperOptions)
     {
         if (!string.IsNullOrEmpty(serperOptions.ApiKey))
@@ -43,15 +40,12 @@ public class CodeAssistantAgent : AgentBase
             "Используй, когда нужно разобраться в устройстве проекта, найти где что лежит, понять архитектуру или зависимости. " +
             "Укажи agent_id='question' и сформулируй точный вопрос.",
             subAgent);
-<<<<<<< Updated upstream
-=======
 
         AddTool<SemanticSearchArgs>("semantic_search",
             "Семантический поиск по коду проекта. Используй, когда пользователь спрашивает 'где реализовано X', " +
             "'найди код для Y', 'покажи функцию которая делает Z', 'как работает ...'. " +
             "Работает по смыслу для любого языка. Возвращает фрагменты кода с путями и строками.",
             semanticSearch);
->>>>>>> Stashed changes
     }
 
     public override string Id => "code";

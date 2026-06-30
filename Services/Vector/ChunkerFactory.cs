@@ -21,7 +21,12 @@ public sealed class ChunkerFactory
     {
         var ext = Path.GetExtension(filePath);
         if (CodeExtensions.Contains(ext))
+        {
+            var fi = new FileInfo(filePath);
+            if (fi.Exists && fi.Length > 500_000)
+                return _fallbackChunker;
             return _regexChunker;
+        }
         return _fallbackChunker;
     }
 

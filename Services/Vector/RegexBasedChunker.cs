@@ -235,7 +235,8 @@ public sealed class RegexBasedChunker : ICodeChunker
     {
         var content = string.Join("\n", blockLines).Trim();
         if (string.IsNullOrWhiteSpace(content) || content.Length < 10)
-            return;            var id = ChunkUtils.ComputeChunkId(filePath, content);
+            return;
+        var id = ChunkUtils.ComputeChunkId(filePath, content, startLine, endLine);
         chunks.Add(new CodeChunk(id, filePath, lang, symbolName, symbolType, null, startLine, endLine, content, fileHash, Array.Empty<float>()));
     }
 
